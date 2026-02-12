@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LinkSpot - Frontend Test Page</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin="anonymous">
+    
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eaeaea;
+            padding: 20px;
+        }
+        
+        h1 {
+            color: #e94560;
+            margin-bottom: 10px;
+        }
+        
+        .subtitle {
+            color: #a0a0a0;
+            margin-bottom: 30px;
+        }
+        
+        .test-section {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .test-section h2 {
+            color: #eaeaea;
+            margin-bottom: 15px;
+            font-size: 18px;
+        }
+        
+        .test-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        
+        .test-card {
+            background: #0f3460;
+            border-radius: 8px;
+            padding: 15px;
+        }
+        
+        .test-card h3 {
+            font-size: 14px;
+            color: #a0a0a0;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+        
+        #map-test {
+            height: 300px;
+            border-radius: 8px;
+            background: #242424;
+        }
+        
+        #sky-plot-test {
+            display: block;
+            margin: 0 auto;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(15, 52, 96, 0.5) 0%, transparent 70%);
+        }
+        
+        .color-swatch {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .swatch {
+            width: 40px;
+            height: 40px;
+            border-radius: 4px;
+        }
+        
+        .swatch.clear { background: #2E8B57; }
+        .swatch.marginal { background: #D4A017; }
+        .swatch.dead { background: #C0392B; }
+        .swatch.building { 
+            background: transparent; 
+            border: 2px solid #495057;
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-right: 10px;
+        }
+        
+        .status-badge.clear {
+            background: rgba(46, 139, 87, 0.3);
+            color: #3da76a;
+        }
+        
+        .status-badge.marginal {
+            background: rgba(212, 160, 23, 0.3);
+            color: #e5b52d;
+        }
+        
+        .status-badge.dead {
+            background: rgba(192, 57, 43, 0.3);
+            color: #d64a3b;
+        }
+        
+        .mock-data {
+            background: #1a1a2e;
+            border-radius: 4px;
+            padding: 10px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 12px;
+            overflow-x: auto;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        .mock-data pre {
+            margin: 0;
+            color: #a0a0a0;
+        }
+        
+        .btn {
+            background: #e94560;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .btn:hover {
+            background: #ff6b6b;
+        }
+        
+        .btn.secondary {
+            background: #0f3460;
+        }
+        
+        .btn.secondary:hover {
+            background: #1a4a7a;
+        }
+        
+        .test-results {
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        
+        .test-results.success {
+            background: rgba(46, 139, 87, 0.2);
+            color: #3da76a;
+        }
+        
+        .test-results.error {
+            background: rgba(192, 57, 43, 0.2);
+            color: #d64a3b;
+        }
+        
+        .loading-spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #0f3460;
+            border-top-color: #e94560;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .satellite-list-test {
+            list-style: none;
+        }
+        
+        .satellite-list-test li {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #16213e;
+        }
+        
+        .satellite-list-test li:last-child {
+            border-bottom: none;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+        }
+        
+        .stat-box {
+            background: #16213e;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 28px;
+            font-weight: 700;
+            color: #e94560;
+        }
+        
+        .stat-label {
+            font-size: 12px;
+            color: #a0a0a0;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔗 LinkSpot Frontend Test</h1>
+    <p class="subtitle">Test page for visualizing mock data and component functionality</p>
+    
+    <!-- Color Palette Test -->
+    <div class="test-section">
+        <h2>🎨 Color Palette (Colorblind-Safe)</h2>
+        <div class="test-grid">
+            <div class="test-card">
+                <h3>Zone Colors</h3>
+                <div class="color-swatch">
+                    <div class="swatch clear"></div>
+                    <div>
+                        <strong>Clear Zone</strong><br>
+                        <small>#2E8B57 - ≥4 satellites visible</small>
+                    </div>
+                </div>
+                <div class="color-swatch">
+                    <div class="swatch marginal"></div>
+                    <div>
+                        <strong>Marginal Zone</strong><br>
+                        <small>#D4A017 - 2-3 satellites visible</small>
+                    </div>
+                </div>
+                <div class="color-swatch">
+                    <div class="swatch dead"></div>
+                    <div>
+                        <strong>Dead Zone</strong><br>
+                        <small>#C0392B - 0-1 satellites visible</small>
+                    </div>
+                </div>
+                <div class="color-swatch">
+                    <div class="swatch building"></div>
+                    <div>
+                        <strong>Building Outline</strong><br>
+                        <small>#495057 - Gray outline</small>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="test-card">
+                <h3>Status Badges</h3>
+                <p style="margin-bottom: 15px;">
+                    <span class="status-badge clear">Clear</span>
+                    <span class="status-badge marginal">Marginal</span>
+                    <span class="status-badge dead">Dead Zone</span>
+                </p>
+                <p style="color: #a0a0a0; font-size: 13px;">
+                    Badges use background tints with matching text colors for accessibility.
+                </p>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Map Test -->
+    <div class="test-section">
+        <h2>🗺️ Map with Mock Grid Data</h2>
+        <div id="map-test"></div>
+        <div style="margin-top: 15px;">
+            <button class="btn" onclick="loadMockHeatMap()">Load Mock Heat Map</button>
+            <button class="btn secondary" onclick="clearHeatMap()">Clear</button>
+            <button class="btn secondary" onclick="toggleBuildings()">Toggle Buildings</button>
+        </div>
+        <div id="map-test-results" class="test-results" style="display: none;"></div>
+    </div>
+    
+    <!-- Sky Plot Test -->
+    <div class="test-section">
+        <h2>🌌 Sky Plot Visualization</h2>
+        <div class="test-grid">
+            <div class="test-card">
+                <canvas id="sky-plot-test" width="280" height="280"></canvas>
+            </div>
+            <div class="test-card">
+                <h3>Controls</h3>
+                <button class="btn" onclick="renderMockSkyPlot()">Render Mock Data</button>
+                <button class="btn secondary" onclick="clearSkyPlot()">Clear</button>
+                <button class="btn secondary" onclick="animateSkyPlot()">Animate</button>
+                <div id="sky-plot-info" style="margin-top: 15px; font-size: 13px; color: #a0a0a0;">
+                    Click "Render Mock Data" to display satellite positions
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- API Client Test -->
+    <div class="test-section">
+        <h2>🔌 API Client Tests</h2>
+        <div class="test-grid">
+            <div class="test-card">
+                <h3>Mock API Responses</h3>
+                <button class="btn" onclick="testAnalyzePosition()">Test /analyze</button>
+                <button class="btn" onclick="testHeatMap()">Test /heatmap</button>
+                <button class="btn" onclick="testSatellites()">Test /satellites</button>
+                <button class="btn secondary" onclick="testHealthCheck()">Health Check</button>
+                <div id="api-test-results" class="test-results" style="display: none;"></div>
+            </div>
+            <div class="test-card">
+                <h3>Response Preview</h3>
+                <div class="mock-data">
+                    <pre id="api-response">Click a test button to see response data...</pre>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Satellite List Test -->
+    <div class="test-section">
+        <h2>📡 Satellite List Component</h2>
+        <div class="test-grid">
+            <div class="test-card">
+                <h3>Visible Satellites</h3>
+                <ul class="satellite-list-test" id="satellite-list-test">
+                    <li style="color: #a0a0a0;">Click "Load Mock Data" to populate</li>
+                </ul>
+            </div>
+            <div class="test-card">
+                <h3>Analysis Stats</h3>
+                <div class="stats-grid" id="stats-grid-test">
+                    <div class="stat-box">
+                        <div class="stat-value">-</div>
+                        <div class="stat-label">Visible</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value">-</div>
+                        <div class="stat-label">Obstructed</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value">-</div>
+                        <div class="stat-label">Total</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value">-</div>
+                        <div class="stat-label">Coverage</div>
+                    </div>
+                </div>
+                <button class="btn" onclick="loadMockSatelliteData()" style="margin-top: 15px;">Load Mock Data</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Mock Data Preview -->
+    <div class="test-section">
+        <h2>📋 Mock Data Structures</h2>
+        <div class="test-grid">
+            <div class="test-card">
+                <h3>Heat Map Grid Cell</h3>
+                <div class="mock-data">
+                    <pre>{
+  "type": "Feature",
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [[...]]
+  },
+  "properties": {
+    "status": "clear",
+    "visible_count": 6,
+    "center": {
+      "lat": 40.7128,
+      "lon": -74.0060
+    }
+  }
+}</pre>
+                </div>
+            </div>
+            <div class="test-card">
+                <h3>Satellite Object</h3>
+                <div class="mock-data">
+                    <pre>{
+  "id": "STARLINK-1234",
+  "name": "Starlink 1234",
+  "constellation": "starlink",
+  "azimuth": 135.5,
+  "elevation": 45.2,
+  "snr": 42.3,
+  "visible": true,
+  "obstructed": false
+}</pre>
+                </div>
+            </div>
+            <div class="test-card">
+                <h3>Analysis Result</h3>
+                <div class="mock-data">
+                    <pre>{
+  "location": {
+    "lat": 40.7128,
+    "lon": -74.0060,
+    "elevation": 10.5
+  },
+  "visibility": {
+    "status": "clear",
+    "visible_satellites": 6,
+    "obstructed_satellites": 2,
+    "total_satellites": 8
+  }
+}</pre>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin="anonymous"></script>
+    
+    <!-- Application Scripts -->
+    <script src="js/api-client.js"></script>
+    <script src="js/sky-plot.js"></script>
+    
+    <script>
+        // ============================================
+        // MOCK DATA
+        // ============================================
+        
+        const mockHeatMapData = {
+            center: { lat: 40.7128, lon: -74.0060 },
+            radius: 500,
+            resolution: 30,
+            grid: {
+                type: 'FeatureCollection',
+                features: generateMockGridCells(40.7128, -74.0060, 10)
+            },
+            buildings: {
+                type: 'FeatureCollection',
+                features: generateMockBuildings(40.7128, -74.0060)
+            }
+        };
+        
+        const mockSatellites = [
+            { id: 'STAR-1234', name: 'Starlink 1234', azimuth: 45, elevation: 65, snr: 45, visible: true, obstructed: false },
+            { id: 'STAR-1235', name: 'Starlink 1235', azimuth: 120, elevation: 42, snr: 38, visible: true, obstructed: false },
+            { id: 'STAR-1236', name: 'Starlink 1236', azimuth: 200, elevation: 35, snr: 35, visible: true, obstructed: false },
+            { id: 'STAR-1237', name: 'Starlink 1237', azimuth: 280, elevation: 55, snr: 42, visible: true, obstructed: false },
+            { id: 'STAR-1238', name: 'Starlink 1238', azimuth: 340, elevation: 28, snr: 32, visible: true, obstructed: false },
+            { id: 'STAR-1239', name: 'Starlink 1239', azimuth: 90, elevation: 15, snr: 28, visible: false, obstructed: true },
+            { id: 'STAR-1240', name: 'Starlink 1240', azimuth: 180, elevation: 8, snr: 25, visible: false, obstructed: true }
+        ];
+        
+        const mockObstructions = [
+            { azimuth: 80, elevation: 25 },
+            { azimuth: 90, elevation: 35 },
+            { azimuth: 100, elevation: 30 },
+            { azimuth: 170, elevation: 15 },
+            { azimuth: 180, elevation: 20 },
+            { azimuth: 190, elevation: 18 }
+        ];
+        
+        // ============================================
+        // MOCK DATA GENERATORS
+        // ============================================
+        
+        function generateMockGridCells(centerLat, centerLon, count) {
+            const cells = [];
+            const statuses = ['clear', 'clear', 'clear', 'marginal', 'marginal', 'dead'];
+            
+            for (let i = 0; i < count; i++) {
+                for (let j = 0; j < count; j++) {
+                    const offsetLat = (i - count/2) * 0.001;
+                    const offsetLon = (j - count/2) * 0.0015;
+                    const lat = centerLat + offsetLat;
+                    const lon = centerLon + offsetLon;
+                    
+                    const status = statuses[Math.floor(Math.random() * statuses.length)];
+                    const visibleCount = status === 'clear' ? 4 + Math.floor(Math.random() * 4) :
+                                        status === 'marginal' ? 2 + Math.floor(Math.random() * 2) :
+                                        Math.floor(Math.random() * 2);
+                    
+                    cells.push({
+                        type: 'Feature',
+                        geometry: {
+                            type: 'Polygon',
+                            coordinates: [[
+                                [lon - 0.0005, lat - 0.0004],
+                                [lon + 0.0005, lat - 0.0004],
+                                [lon + 0.0005, lat + 0.0004],
+                                [lon - 0.0005, lat + 0.0004],
+                                [lon - 0.0005, lat - 0.0004]
+                            ]]
+                        },
+                        properties: {
+                            status,
+                            visible_count: visibleCount,
+                            center: { lat, lon }
+                        }
+                    });
+                }
+            }
+            return cells;
+        }
+        
+        function generateMockBuildings(centerLat, centerLon) {
+            return [
+                {
+                    type: 'Feature',
+                    geometry: {
+                        type: 'Polygon',
+                        coordinates: [[
+                            [centerLon - 0.002, centerLat - 0.001],
+                            [centerLon - 0.001, centerLat - 0.001],
+                            [centerLon - 0.001, centerLat + 0.001],
+                            [centerLon - 0.002, centerLat + 0.001],
+                            [centerLon - 0.002, centerLat - 0.001]
+                        ]]
+                    },
+                    properties: { height: 45 }
+                },
+                {
+                    type: 'Feature',
+                    geometry: {
+                        type: 'Polygon',
+                        coordinates: [[
+                            [centerLon + 0.001, centerLat + 0.002],
+                            [centerLon + 0.003, centerLat + 0.002],
+                            [centerLon + 0.003, centerLat + 0.003],
+                            [centerLon + 0.001, centerLat + 0.003],
+                            [centerLon + 0.001, centerLat + 0.002]
+                        ]]
+                    },
+                    properties: { height: 60 }
+                }
+            ];
+        }
+        
+        // ============================================
+        // MAP TEST
+        // ============================================
+        
+        let testMap;
+        let gridLayer;
+        let buildingLayer;
+        
+        function initTestMap() {
+            testMap = L.map('map-test', {
+                renderer: L.canvas()
+            }).setView([40.7128, -74.0060], 16);
+            
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                attribution: '&copy; CARTO',
+                subdomains: 'abcd',
+                maxZoom: 20
+            }).addTo(testMap);
+        }
+        
+        function loadMockHeatMap() {
+            if (gridLayer) testMap.removeLayer(gridLayer);
+            
+            gridLayer = L.geoJSON(mockHeatMapData.grid, {
+                style: (feature) => {
+                    const colors = {
+                        clear: '#2E8B57',
+                        marginal: '#D4A017',
+                        dead: '#C0392B'
+                    };
+                    return {
+                        fillColor: colors[feature.properties.status],
+                        fillOpacity: 0.6,
+                        color: 'rgba(255,255,255,0.2)',
+                        weight: 1
+                    };
+                },
+                onEachFeature: (feature, layer) => {
+                    layer.bindTooltip(
+                        `${feature.properties.status}: ${feature.properties.visible_count} sats`,
+                        { direction: 'top' }
+                    );
+                }
+            }).addTo(testMap);
+            
+            showResult('map-test-results', '✓ Mock heat map loaded with ' + 
+                mockHeatMapData.grid.features.length + ' grid cells', 'success');
+        }
+        
+        function clearHeatMap() {
+            if (gridLayer) {
+                testMap.removeLayer(gridLayer);
+                gridLayer = null;
+            }
+            document.getElementById('map-test-results').style.display = 'none';
+        }
+        
+        function toggleBuildings() {
+            if (buildingLayer) {
+                testMap.removeLayer(buildingLayer);
+                buildingLayer = null;
+            } else {
+                buildingLayer = L.geoJSON(mockHeatMapData.buildings, {
+                    style: {
+                        fillColor: '#6c757d',
+                        fillOpacity: 0.3,
+                        color: '#495057',
+                        weight: 1.5
+                    }
+                }).addTo(testMap);
+            }
+        }
+        
+        // ============================================
+        // SKY PLOT TEST
+        // ============================================
+        
+        let skyPlot;
+        
+        function initSkyPlot() {
+            const canvas = document.getElementById('sky-plot-test');
+            skyPlot = new SkyPlot(canvas);
+        }
+        
+        function renderMockSkyPlot() {
+            skyPlot.setData(mockSatellites, mockObstructions);
+            document.getElementById('sky-plot-info').innerHTML = 
+                `✓ Rendered ${mockSatellites.length} satellites, ${mockObstructions.length} obstruction points`;
+        }
+        
+        function clearSkyPlot() {
+            skyPlot.setData([], []);
+            document.getElementById('sky-plot-info').textContent = 'Sky plot cleared';
+        }
+        
+        function animateSkyPlot() {
+            const sequence = [];
+            for (let i = 0; i < 24; i++) {
+                const offsetSats = mockSatellites.map(sat => ({
+                    ...sat,
+                    azimuth: (sat.azimuth + i * 15) % 360
+                }));
+                sequence.push(offsetSats);
+            }
+            skyPlot.animate(sequence, 200);
+            document.getElementById('sky-plot-info').textContent = 'Animation running...';
+        }
+        
+        // ============================================
+        // API TESTS
+        // ============================================
+        
+        function showResult(elementId, message, type) {
+            const el = document.getElementById(elementId);
+            el.textContent = message;
+            el.className = 'test-results ' + type;
+            el.style.display = 'block';
+        }
+        
+        function displayResponse(data) {
+            document.getElementById('api-response').textContent = JSON.stringify(data, null, 2);
+        }
+        
+        async function testAnalyzePosition() {
+            showResult('api-test-results', '⏳ Testing /analyze endpoint...', 'success');
+            
+            // Simulate API delay
+            await new Promise(r => setTimeout(r, 500));
+            
+            const mockResponse = {
+                location: { lat: 40.7128, lon: -74.0060, elevation: 10.5 },
+                timestamp: new Date().toISOString(),
+                visibility: {
+                    status: 'clear',
+                    visible_satellites: 6,
+                    obstructed_satellites: 2,
+                    total_satellites: 8
+                },
+                satellites: mockSatellites,
+                obstructions: mockObstructions
+            };
+            
+            displayResponse(mockResponse);
+            showResult('api-test-results', '✓ /analyze endpoint working (mock)', 'success');
+        }
+        
+        async function testHeatMap() {
+            showResult('api-test-results', '⏳ Testing /heatmap endpoint...', 'success');
+            
+            await new Promise(r => setTimeout(r, 500));
+            
+            displayResponse(mockHeatMapData);
+            showResult('api-test-results', 
+                `✓ /heatmap endpoint working (mock) - ${mockHeatMapData.grid.features.length} cells`, 
+                'success');
+        }
+        
+        async function testSatellites() {
+            showResult('api-test-results', '⏳ Testing /satellites endpoint...', 'success');
+            
+            await new Promise(r => setTimeout(r, 500));
+            
+            const mockResponse = {
+                timestamp: new Date().toISOString(),
+                location: { lat: 40.7128, lon: -74.0060 },
+                satellites: mockSatellites
+            };
+            
+            displayResponse(mockResponse);
+            showResult('api-test-results', 
+                `✓ /satellites endpoint working (mock) - ${mockSatellites.length} satellites`, 
+                'success');
+        }
+        
+        async function testHealthCheck() {
+            showResult('api-test-results', '⏳ Testing /health endpoint...', 'success');
+            
+            await new Promise(r => setTimeout(r, 300));
+            
+            const mockResponse = {
+                status: 'healthy',
+                version: '1.0.0',
+                timestamp: new Date().toISOString(),
+                uptime: 86400
+            };
+            
+            displayResponse(mockResponse);
+            showResult('api-test-results', '✓ API is healthy (mock)', 'success');
+        }
+        
+        // ============================================
+        // SATELLITE LIST TEST
+        // ============================================
+        
+        function loadMockSatelliteData() {
+            const listEl = document.getElementById('satellite-list-test');
+            const visibleSats = mockSatellites.filter(s => s.visible && !s.obstructed);
+            
+            listEl.innerHTML = visibleSats.map(sat => `
+                <li>
+                    <span>${sat.name}</span>
+                    <span style="color: #a0a0a0;">${Math.round(sat.elevation)}° / ${sat.snr} dB</span>
+                </li>
+            `).join('');
+            
+            const statsEl = document.getElementById('stats-grid-test');
+            const visible = visibleSats.length;
+            const obstructed = mockSatellites.filter(s => s.obstructed).length;
+            const total = mockSatellites.length;
+            const coverage = Math.round((visible / total) * 100);
+            
+            statsEl.innerHTML = `
+                <div class="stat-box">
+                    <div class="stat-value">${visible}</div>
+                    <div class="stat-label">Visible</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">${obstructed}</div>
+                    <div class="stat-label">Obstructed</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">${total}</div>
+                    <div class="stat-label">Total</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">${coverage}%</div>
+                    <div class="stat-label">Coverage</div>
+                </div>
+            `;
+        }
+        
+        // ============================================
+        // INITIALIZATION
+        // ============================================
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            initTestMap();
+            initSkyPlot();
+            
+            console.log('✅ LinkSpot Test Page Loaded');
+            console.log('📦 Mock data ready for testing');
+        });
+    </script>
+</body>
+</html>

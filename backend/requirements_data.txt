@@ -1,0 +1,52 @@
+# LinkSpot Data Pipeline Dependencies
+# BSD 3-Clause License
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Requirements for building and terrain data ingestion pipeline
+# Includes geospatial processing, caching, and database connectivity
+
+# Core Geospatial Processing
+geopandas>=0.14.0
+shapely>=2.0.0
+pyproj>=3.6.0
+rasterio>=1.3.8
+
+# Data Processing
+numpy>=1.24.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+
+# Caching & Storage
+redis>=5.0.0
+
+# Database Connectivity
+SQLAlchemy>=2.0.0
+psycopg2-binary>=2.9.9
+GeoAlchemy2>=0.14.0
+
+# HTTP & API Requests
+requests>=2.31.0
+urllib3>=2.0.0
+
+# AWS Integration (for S3 access)
+boto3>=1.34.0
+botocore>=1.34.0
+
+# GeoJSON Handling
+geojson>=3.1.0
+
+# Geohash Encoding (for cache keys)
+python-geohash>=0.8.5
+
+# Type Hints Support (Python < 3.9)
+typing-extensions>=4.8.0
+
+# Optional: Performance optimizations
+# pygeos>=0.14  # Uncomment for faster geometry operations
+# fiona>=1.9.5  # Uncomment for additional format support
+
+# Development & Testing (optional)
+# pytest>=7.4.0
+# pytest-cov>=4.1.0
+# black>=23.0.0
+# mypy>=1.7.0

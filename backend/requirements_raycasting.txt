@@ -1,0 +1,82 @@
+# LinkSpot Ray-Casting Engine Dependencies
+# BSD 3-Clause License - See individual source files for full license text
+
+# Core numerical computing - REQUIRED
+numpy>=1.21.0
+
+# Geometric operations and spatial data structures - REQUIRED
+# Used for building footprint operations and spatial indexing
+shapely>=1.8.0
+
+# Geospatial data handling - REQUIRED
+# Used for building data management and GeoJSON export
+geopandas>=0.10.0
+
+# Coordinate system transformations - REQUIRED
+# Used for WGS84 <-> ENU coordinate conversions
+pyproj>=3.2.0
+
+# Optional dependencies for enhanced functionality
+# These provide additional features but are not required for core operation
+
+# Progress bars for long-running operations (optional)
+tqdm>=4.62.0
+
+# Caching for repeated calculations (optional)
+# functools.lru_cache is used from standard library
+
+# Testing framework (for development)
+pytest>=6.2.0
+pytest-cov>=2.12.0
+
+# Type checking (for development)
+mypy>=0.910
+
+# Documentation generation (for development)
+sphinx>=4.0.0
+
+# =============================================================================
+# Installation Instructions
+# =============================================================================
+# 
+# Basic installation (core functionality):
+#   pip install numpy shapely geopandas pyproj
+#
+# Development installation (includes testing and type checking):
+#   pip install -r requirements_raycasting.txt
+#
+# =============================================================================
+# Dependency Notes
+# =============================================================================
+#
+# numpy: Core vectorized operations for all geometric calculations
+#        - Azimuth/elevation angle computations
+#        - ENU coordinate transformations
+#        - Obstruction profile generation
+#
+# shapely: 2D geometric operations
+#          - Building footprint polygon operations
+#          - Point-in-polygon tests for building containment
+#          - Buffer operations for search radius
+#
+# geopandas: Geospatial data management
+#            - Building data loading from shapefiles/GeoJSON
+#            - Spatial joins and filtering
+#            - GeoJSON export for frontend visualization
+#
+# pyproj: Coordinate reference system transformations
+#         - WGS84 to local ENU conversions
+#         - Accurate ellipsoid calculations
+#         - Datum transformations
+#
+# =============================================================================
+# Version Compatibility
+# =============================================================================
+#
+# Python: 3.8+
+# NumPy: 1.21+ (required for type annotations)
+# GeoPandas: 0.10+ (required for GeoDataFrame operations)
+# Shapely: 1.8+ (required for vectorized operations)
+# PyProj: 3.2+ (required for CRS transformations)
+#
+# =============================================================================

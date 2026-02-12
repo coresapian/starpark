@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#1a1a2e">
+    <meta name="description" content="LinkSpot - Satellite Visibility Heat Map Analysis">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    
+    <title>LinkSpot - Satellite Visibility Analysis</title>
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="assets/icon-192.png">
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin="anonymous">
+    
+    <!-- Custom Styles -->
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <!-- Loading Indicator -->
+    <div id="loading-overlay" class="loading-overlay" aria-hidden="true">
+        <div class="loading-spinner" role="status">
+            <span class="sr-only">Loading...</span>
+        </div>
+        <p class="loading-text">Analyzing satellite visibility...</p>
+    </div>
+    
+    <!-- Offline Indicator -->
+    <div id="offline-indicator" class="offline-indicator" aria-hidden="true">
+        <span class="offline-icon">⚠️</span>
+        <span>Offline Mode</span>
+    </div>
+    
+    <!-- Main Map Container -->
+    <main id="map" class="map-container" role="main" aria-label="Satellite visibility heat map">
+        <!-- Map will be initialized here -->
+    </main>
+    
+    <!-- Search Bar (Top Center) -->
+    <div class="search-container" role="search">
+        <div class="search-wrapper">
+            <input 
+                type="text" 
+                id="search-input" 
+                class="search-input" 
+                placeholder="Search address or city..."
+                aria-label="Search location"
+                autocomplete="off"
+            >
+            <button 
+                id="search-btn" 
+                class="search-btn" 
+                aria-label="Search"
+                type="button"
+            >
+                <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                    <path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+                </svg>
+            </button>
+            <button 
+                id="search-clear" 
+                class="search-clear hidden" 
+                aria-label="Clear search"
+                type="button"
+            >
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                    <path fill="currentColor" d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                </svg>
+            </button>
+        </div>
+        <div id="search-results" class="search-results" role="listbox" aria-label="Search results"></div>
+    </div>
+    
+    <!-- GPS Button (Top Right) -->
+    <button 
+        id="gps-btn" 
+        class="gps-btn" 
+        aria-label="Center on my location"
+        type="button"
+        title="My Location"
+    >
+        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+            <path fill="currentColor" d="M12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm8.94 3A8.994 8.994 0 0 0 13 3.06V1h-2v2.06A8.994 8.994 0 0 0 3.06 11H1v2h2.06A8.994 8.994 0 0 0 11 20.94V23h2v-2.06A8.994 8.994 0 0 0 20.94 13H23v-2h-2.06zM12 19c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"/>
+        </svg>
+    </button>
+    
+    <!-- Time Slider Control (Bottom) -->
+    <div class="time-slider-container">
+        <div class="time-slider-header">
+            <span class="time-label">Analysis Time</span>
+            <span id="current-time" class="current-time">12:00</span>
+        </div>
+        <div class="time-slider-wrapper">
+            <button 
+                id="play-btn" 
+                class="play-btn" 
+                aria-label="Play time animation"
+                type="button"
+            >
+                <svg id="play-icon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                    <path fill="currentColor" d="M8 5v14l11-7z"/>
+                </svg>
+                <svg id="pause-icon" class="hidden" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                    <path fill="currentColor" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+                </svg>
+            </button>
+            <input 
+                type="range" 
+                id="time-slider" 
+                class="time-slider"
+                min="0" 
+                max="95" 
+                value="48"
+                aria-label="Time slider"
+                aria-valuemin="0"
+                aria-valuemax="95"
+                aria-valuenow="48"
+            >
+        </div>
+        <div class="time-slider-labels">
+            <span>00:00</span>
+            <span>06:00</span>
+            <span>12:00</span>
+            <span>18:00</span>
+            <span>23:45</span>
+        </div>
+    </div>
+    
+    <!-- Legend Overlay (Bottom Right) -->
+    <div class="legend-container" role="complementary" aria-label="Map legend">
+        <h3 class="legend-title">Visibility Status</h3>
+        <div class="legend-items">
+            <div class="legend-item">
+                <span class="legend-color legend-clear"></span>
+                <span class="legend-label">Clear</span>
+                <span class="legend-desc">≥4 sats visible</span>
+            </div>
+            <div class="legend-item">
+                <span class="legend-color legend-marginal"></span>
+                <span class="legend-label">Marginal</span>
+                <span class="legend-desc">2-3 sats visible</span>
+            </div>
+            <div class="legend-item">
+                <span class="legend-color legend-dead"></span>
+                <span class="legend-label">Dead Zone</span>
+                <span class="legend-desc">0-1 sats visible</span>
+            </div>
+            <div class="legend-item legend-building">
+                <span class="legend-outline"></span>
+                <span class="legend-label">Building</span>
+            </div>
+        </div>
+        <button 
+            id="legend-toggle" 
+            class="legend-toggle"
+            aria-label="Toggle legend"
+            aria-expanded="true"
+            type="button"
+        >
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                <path fill="currentColor" d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/>
+            </svg>
+        </button>
+    </div>
+    
+    <!-- Detail Panel (Slide-out) -->
+    <aside 
+        id="detail-panel" 
+        class="detail-panel"
+        role="dialog"
+        aria-label="Location details"
+        aria-hidden="true"
+    >
+        <div class="detail-panel-header">
+            <h2 id="detail-title" class="detail-title">Location Details</h2>
+            <button 
+                id="detail-close" 
+                class="detail-close"
+                aria-label="Close details"
+                type="button"
+            >
+                <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+                    <path fill="currentColor" d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                </svg>
+            </button>
+        </div>
+        <div class="detail-panel-content">
+            <div id="detail-coords" class="detail-coords"></div>
+            <div id="detail-status" class="detail-status"></div>
+            
+            <!-- Sky Plot Canvas -->
+            <div class="sky-plot-container">
+                <h3 class="sky-plot-title">Sky View</h3>
+                <canvas id="sky-plot" class="sky-plot" width="280" height="280"></canvas>
+                <div class="sky-plot-legend">
+                    <span class="sky-legend-item">
+                        <span class="sky-legend-marker sky-satellite"></span>
+                        Satellite
+                    </span>
+                    <span class="sky-legend-item">
+                        <span class="sky-legend-marker sky-obstruction"></span>
+                        Obstruction
+                    </span>
+                </div>
+            </div>
+            
+            <!-- Satellite List -->
+            <div class="satellite-list-container">
+                <h3 class="satellite-list-title">Visible Satellites</h3>
+                <ul id="satellite-list" class="satellite-list"></ul>
+            </div>
+            
+            <!-- Analysis Summary -->
+            <div class="analysis-summary">
+                <h3 class="analysis-title">Analysis Summary</h3>
+                <div id="analysis-stats" class="analysis-stats"></div>
+            </div>
+        </div>
+    </aside>
+    
+    <!-- Detail Panel Backdrop -->
+    <div id="detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
+    
+    <!-- Toast Notifications -->
+    <div id="toast-container" class="toast-container" role="status" aria-live="polite"></div>
+    
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin="anonymous"></script>
+    
+    <!-- Application Scripts -->
+    <script src="js/api-client.js"></script>
+    <script src="js/sky-plot.js"></script>
+    <script src="js/app.js"></script>
+    
+    <!-- Service Worker Registration -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('sw.js')
+                    .then(registration => {
+                        console.log('SW registered:', registration.scope);
+                    })
+                    .catch(error => {
+                        console.log('SW registration failed:', error);
+                    });
+            });
+        }
+    </script>
+</body>
+</html>

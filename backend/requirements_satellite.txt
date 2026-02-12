@@ -1,0 +1,30 @@
+# Satellite Constellation Engine Dependencies for LinkSpot
+# 
+# This file lists all Python package dependencies required for the
+# SatelliteEngine module which computes azimuth/elevation of Starlink
+# satellites using SGP4 propagation.
+#
+# Installation: pip install -r requirements_satellite.txt
+#
+# Minimum Python version: 3.8+
+
+# Core orbital mechanics library
+# Provides SGP4 propagation, coordinate transformations, and time handling
+skyfield>=1.46.0
+
+# SGP4 propagation (included with skyfield but explicit for clarity)
+sgp4>=2.23
+
+# Redis client for TLE caching
+redis>=5.0.0
+
+# Numerical operations for vectorized calculations
+numpy>=1.24.0
+
+# HTTP client for fetching TLE data from CelesTrak
+requests>=2.31.0
+
+# Development dependencies (optional, for testing)
+# pytest>=7.4.0
+# pytest-cov>=4.1.0
+# pytest-asyncio>=0.21.0

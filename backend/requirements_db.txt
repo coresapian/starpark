@@ -1,0 +1,106 @@
+# LinkSpot Database Dependencies
+# PostgreSQL + PostGIS + Redis stack for geospatial data storage
+
+# =============================================================================
+# Core Database
+# =============================================================================
+
+# SQLAlchemy - ORM and SQL toolkit
+sqlalchemy>=2.0.0,<3.0.0
+
+# Async PostgreSQL driver
+asyncpg>=0.29.0,<1.0.0
+
+# GeoAlchemy2 - PostGIS integration for SQLAlchemy
+geoalchemy2>=0.14.0,<1.0.0
+
+# Database migrations
+alembic>=1.12.0,<2.0.0
+
+# =============================================================================
+# Redis Cache
+# =============================================================================
+
+# Redis client with async support
+redis>=5.0.0,<6.0.0
+
+# Alternative async Redis (if needed)
+# aioredis>=2.0.0  # Note: merged into redis>=4.2.0
+
+# =============================================================================
+# Geospatial Processing
+# =============================================================================
+
+# Shapely - geometric operations
+shapely>=2.0.0,<3.0.0
+
+# GeoPandas - spatial dataframes
+geopandas>=0.14.0,<1.0.0
+
+# PyProj - coordinate transformations
+pyproj>=3.6.0,<4.0.0
+
+# Geohash encoding/decoding
+pygeohash>=1.2.0,<2.0.0
+
+# =============================================================================
+# Data Processing
+# =============================================================================
+
+# NumPy - numerical operations
+numpy>=1.24.0,<2.0.0
+
+# Pandas - data manipulation
+pandas>=2.0.0,<3.0.0
+
+# =============================================================================
+# Testing
+# =============================================================================
+
+# Pytest - testing framework
+pytest>=7.4.0,<8.0.0
+
+# Async pytest support
+pytest-asyncio>=0.21.0,<1.0.0
+
+# =============================================================================
+# Utilities
+# =============================================================================
+
+# Python dateutil - date/time utilities
+python-dateutil>=2.8.0,<3.0.0
+
+# UUID generation (built-in, but explicit for clarity)
+# uuid - part of Python standard library
+
+# Typing extensions for older Python versions
+typing-extensions>=4.8.0,<5.0.0
+
+# =============================================================================
+# Optional Performance
+# =============================================================================
+
+# psycopg2-binary - Alternative PostgreSQL driver (sync)
+# psycopg2-binary>=2.9.0,<3.0.0
+
+# ujson - faster JSON parsing (optional)
+# ujson>=5.8.0,<6.0.0
+
+# orjson - even faster JSON (optional)
+# orjson>=3.9.0,<4.0.0
+
+# =============================================================================
+# Development (optional)
+# =============================================================================
+
+# Black - code formatting
+# black>=23.0.0,<24.0.0
+
+# isort - import sorting
+# isort>=5.12.0,<6.0.0
+
+# mypy - type checking
+# mypy>=1.6.0,<2.0.0
+
+# flake8 - linting
+# flake8>=6.1.0,<7.0.0
