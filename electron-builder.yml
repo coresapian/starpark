@@ -16,6 +16,9 @@ files:
 mac:
   category: public.app-category.utilities
   icon: electron/icons/icon.icns
+  extendInfo:
+    NSLocationUsageDescription: "LinkSpot needs your location to center the map and analyze satellite visibility from your position."
+    NSLocationWhenInUseUsageDescription: "LinkSpot needs your location to center the map and analyze satellite visibility from your position."
   target:
     - target: dmg
       arch:

@@ -3,7 +3,7 @@
  * Creates the main window, registers protocol, and manages app lifecycle.
  */
 
-const { app, BrowserWindow, ipcMain, Notification, session } = require('electron');
+const { app, BrowserWindow, ipcMain, Notification, session, dialog, shell, net } = require('electron');
 const path = require('path');
 const log = require('electron-log');
 const windowStateKeeper = require('electron-window-state');
@@ -57,17 +57,9 @@ function createMainWindow() {
   // Load the app via custom protocol
   mainWindow.loadURL('app://linkspot/index.html');
 
-  // Wire up menu commands and unregister service workers after page loads
+  // Wire menu commands to the app after page loads
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindow.webContents.executeJavaScript(`
-      // Unregister any service workers (they're replaced by no-op via protocol handler)
-      if (navigator.serviceWorker) {
-        navigator.serviceWorker.getRegistrations().then(registrations => {
-          registrations.forEach(r => r.unregister());
-        });
-      }
-
-      // Wire Electron menu commands to the app
       if (window.electronAPI) {
         window.electronAPI.onFocusSearch(() => {
           const input = document.getElementById('search-input');
@@ -181,6 +173,52 @@ ipcMain.handle('test-backend', async (_event, url) => {
   }
 });
 
+ipcMain.handle('get-ip-location', async () => {
+  const services = [
+    {
+      url: 'https://ipapi.co/json/',
+      parse: (d) => d.latitude && d.longitude ? { lat: d.latitude, lon: d.longitude, city: d.city } : null
+    },
+    {
+      url: 'https://freeipapi.com/api/json',
+      parse: (d) => d.latitude && d.longitude ? { lat: d.latitude, lon: d.longitude, city: d.cityName } : null
+    }
+  ];
+
+  for (const svc of services) {
+    try {
+      const resp = await net.fetch(svc.url, { method: 'GET' });
+      const data = await resp.json();
+      const result = svc.parse(data);
+      if (result) {
+        log.info(`IP geolocation: ${result.lat}, ${result.lon} (${result.city || 'unknown'})`);
+        return result;
+      }
+    } catch (err) {
+      log.warn(`IP geolocation failed for ${svc.url}:`, err.message);
+    }
+  }
+  return null;
+});
+
+ipcMain.handle('prompt-location-permission', async () => {
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: 'Location Access Required',
+    message: 'LinkSpot needs access to your location to center the map and analyze satellite visibility.',
+    detail: 'Please enable Location Services for LinkSpot in System Settings > Privacy & Security > Location Services.',
+    buttons: ['Open System Settings', 'Cancel'],
+    defaultId: 0,
+    cancelId: 1
+  });
+
+  if (response === 0) {
+    shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices');
+  }
+
+  return { opened: response === 0 };
+});
+
 ipcMain.handle('show-notification', (_event, opts) => {
   if (!store.get('notifications')) return { shown: false };
 
@@ -200,8 +238,41 @@ ipcMain.handle('show-notification', (_event, opts) => {
 app.whenReady().then(() => {
   log.info('LinkSpot Electron starting...');
 
+  // In dev mode, patch the Electron.app Info.plist to include NSLocationUsageDescription
+  // so macOS can show the location permission prompt
+  if (!app.isPackaged) {
+    try {
+      const { execSync } = require('child_process');
+      const plistPath = path.join(
+        path.dirname(process.execPath), '..', 'Info.plist'
+      );
+      const fs = require('fs');
+      if (fs.existsSync(plistPath)) {
+        const content = fs.readFileSync(plistPath, 'utf-8');
+        if (!content.includes('NSLocationUsageDescription')) {
+          execSync(
+            `/usr/libexec/PlistBuddy -c "Add :NSLocationUsageDescription string 'LinkSpot needs your location to center the map and analyze satellite visibility.'" "${plistPath}"`,
+            { stdio: 'ignore' }
+          );
+          log.info('Patched dev Electron.app Info.plist with NSLocationUsageDescription');
+        }
+      }
+    } catch (err) {
+      log.warn('Could not patch dev Info.plist:', err.message);
+    }
+  }
+
   // Register protocol handler
   setupProtocolHandler();
+
+  // Grant permissions for geolocation, notifications, etc.
+  const allowedPermissions = ['geolocation', 'notifications', 'media'];
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    callback(allowedPermissions.includes(permission));
+  });
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission) => {
+    return allowedPermissions.includes(permission);
+  });
 
   // Create main window
   createMainWindow();
