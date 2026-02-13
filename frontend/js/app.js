@@ -22,7 +22,7 @@ class LinkSpotApp {
         this.config = {
             apiBaseURL: options.apiBaseURL || '/api/v1',
             initialPosition: options.initialPosition || { lat: 40.7128, lon: -74.0060, zoom: 16 },
-            gridResolution: options.gridResolution || 30,
+            gridResolution: options.gridResolution || 50,
             heatMapRadius: options.heatMapRadius || 500,
             timeSliderStep: 15, // minutes
             animationInterval: 500 // ms between frames

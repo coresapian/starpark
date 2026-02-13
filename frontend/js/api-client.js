@@ -109,9 +109,9 @@ class APIClient {
      * @returns {boolean} Whether to retry
      */
     shouldRetry(error) {
-        // Retry on network errors and 5xx status codes
+        // Retry on network errors and 5xx status codes, but not 429
         if (error instanceof APIError) {
-            return error.status >= 500 || error.status === 408;
+            return (error.status >= 500 || error.status === 408) && error.status !== 429;
         }
         return true; // Network errors
     }
@@ -247,8 +247,8 @@ class APIClient {
         const body = {
             lat: parseFloat(lat),
             lon: parseFloat(lon),
-            radius: parseInt(radius, 10),
-            resolution: parseInt(resolution, 10)
+            radius_m: parseInt(radius, 10),
+            spacing_m: parseInt(resolution, 10)
         };
         
         if (timestamp) {

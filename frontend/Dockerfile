@@ -15,10 +15,8 @@ RUN mkdir -p /usr/share/nginx/html \
 
 # Copy static files
 COPY index.html /usr/share/nginx/html/
-COPY css/ /usr/share/nginx/html/css/ 2>/dev/null || true
-COPY js/ /usr/share/nginx/html/js/ 2>/dev/null || true
-COPY assets/ /usr/share/nginx/html/assets/ 2>/dev/null || true
-COPY images/ /usr/share/nginx/html/images/ 2>/dev/null || true
+COPY css/ /usr/share/nginx/html/css/
+COPY js/ /usr/share/nginx/html/js/
 
 # Copy custom nginx configuration template
 COPY nginx.conf /etc/nginx/conf.d/default.conf.template

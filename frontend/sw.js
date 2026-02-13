@@ -4,9 +4,9 @@
  * @version 1.0.0
  */
 
-const CACHE_NAME = 'linkspot-v1';
-const STATIC_CACHE = 'linkspot-static-v1';
-const API_CACHE = 'linkspot-api-v1';
+const CACHE_NAME = 'linkspot-v2';
+const STATIC_CACHE = 'linkspot-static-v2';
+const API_CACHE = 'linkspot-api-v2';
 
 // Static assets to cache on install
 const STATIC_ASSETS = [

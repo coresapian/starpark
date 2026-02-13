@@ -228,7 +228,7 @@ class RedisRateLimitMiddleware(BaseHTTPMiddleware):
     async def _get_redis(self):
         """Get or create Redis connection."""
         if self._redis is None:
-            import aioredis
+            import redis.asyncio as aioredis
             self._redis = aioredis.from_url(
                 self.redis_url,
                 encoding="utf-8",

@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-import aioredis
+import redis.asyncio as aioredis
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
