@@ -1,0 +1,24 @@
+{
+  "name": "linkspot",
+  "version": "1.0.0",
+  "description": "LinkSpot - Satellite Visibility Analysis Platform",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --mac",
+    "build:universal": "electron-builder --mac --universal",
+    "pack": "electron-builder --dir"
+  },
+  "author": "LinkSpot",
+  "license": "BSD-3-Clause",
+  "devDependencies": {
+    "electron": "^28.1.0",
+    "electron-builder": "^24.9.1"
+  },
+  "dependencies": {
+    "electron-log": "^5.1.1",
+    "electron-store": "^8.1.0",
+    "electron-updater": "^6.1.7",
+    "electron-window-state": "^5.0.3"
+  }
+}

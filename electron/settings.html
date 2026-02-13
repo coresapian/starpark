@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Preferences</title>
+    <link rel="stylesheet" href="settings.css">
+</head>
+<body>
+    <div class="settings-container">
+        <h1 class="settings-title">Preferences</h1>
+
+        <div class="settings-section">
+            <label class="settings-label" for="backend-url">Backend URL</label>
+            <div class="input-row">
+                <input
+                    type="url"
+                    id="backend-url"
+                    class="settings-input"
+                    placeholder="http://localhost:8000"
+                    spellcheck="false"
+                >
+                <button id="test-btn" class="btn btn-secondary" type="button">
+                    Test
+                </button>
+            </div>
+            <div id="test-status" class="test-status"></div>
+        </div>
+
+        <div class="settings-section">
+            <label class="settings-toggle">
+                <input type="checkbox" id="notifications-toggle">
+                <span class="toggle-slider"></span>
+                <span class="toggle-label">Enable Notifications</span>
+            </label>
+        </div>
+
+        <div class="settings-actions">
+            <button id="cancel-btn" class="btn btn-secondary" type="button">Cancel</button>
+            <button id="save-btn" class="btn btn-primary" type="button">Save</button>
+        </div>
+    </div>
+
+    <script src="settings.js"></script>
+</body>
+</html>
