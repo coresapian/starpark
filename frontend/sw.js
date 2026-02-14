@@ -4,21 +4,21 @@
  * @version 1.0.0
  */
 
-const CACHE_NAME = 'linkspot-v2';
-const STATIC_CACHE = 'linkspot-static-v2';
-const API_CACHE = 'linkspot-api-v2';
+const CACHE_NAME = 'linkspot-v3';
+const STATIC_CACHE = 'linkspot-static-v3';
+const API_CACHE = 'linkspot-api-v3';
 
 // Static assets to cache on install
 const STATIC_ASSETS = [
     '/',
     '/index.html',
     '/css/styles.css',
+    '/js/anymap-bundle.js',
+    '/js/anymap-bundle.css',
     '/js/app.js',
     '/js/api-client.js',
     '/js/sky-plot.js',
-    '/manifest.json',
-    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
-    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'
+    '/manifest.json'
 ];
 
 // API routes that should use network-first strategy

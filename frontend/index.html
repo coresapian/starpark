@@ -14,11 +14,9 @@
     <link rel="manifest" href="manifest.json">
     <link rel="apple-touch-icon" href="assets/icon-192.png">
     
-    <!-- Leaflet CSS -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-          crossorigin="anonymous">
-    
+    <!-- Anymap-ts Leaflet CSS (bundled from anymap-ts) -->
+    <link rel="stylesheet" href="js/anymap-bundle.css">
+
     <!-- Custom Styles -->
     <link rel="stylesheet" href="css/styles.css">
 </head>
@@ -230,11 +228,9 @@
     <!-- Toast Notifications -->
     <div id="toast-container" class="toast-container" role="status" aria-live="polite"></div>
     
-    <!-- Leaflet JS -->
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-            crossorigin="anonymous"></script>
-    
+    <!-- Anymap-ts Bundle (includes Leaflet via anymap-ts LeafletRenderer) -->
+    <script src="js/anymap-bundle.js"></script>
+
     <!-- Application Scripts -->
     <script src="js/api-client.js"></script>
     <script src="js/sky-plot.js"></script>
