@@ -1,6 +1,22 @@
 # LinkSpot Frontend Dockerfile
-# Nginx-based static file server for Leaflet/Canvas application
+# Multi-stage build: Node.js for anymap-ts bundle, Nginx for serving
 
+# Stage 1: Build anymap-ts bundle
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files and install dependencies
+COPY package.json package-lock.json* ./
+RUN npm ci --ignore-scripts 2>/dev/null || npm install
+
+# Copy source files for building
+COPY src/ ./src/
+
+# Build the anymap-ts bundle
+RUN npm run build:prod
+
+# Stage 2: Nginx-based static file server
 FROM nginx:1.25-alpine
 
 # Install envsubst for environment variable substitution
@@ -17,6 +33,10 @@ RUN mkdir -p /usr/share/nginx/html \
 COPY index.html /usr/share/nginx/html/
 COPY css/ /usr/share/nginx/html/css/
 COPY js/ /usr/share/nginx/html/js/
+
+# Copy built anymap-ts bundle from builder stage
+COPY --from=builder /app/js/anymap-bundle.js /usr/share/nginx/html/js/anymap-bundle.js
+COPY --from=builder /app/js/anymap-bundle.css /usr/share/nginx/html/js/anymap-bundle.css
 
 # Copy custom nginx configuration template
 COPY nginx.conf /etc/nginx/conf.d/default.conf.template
