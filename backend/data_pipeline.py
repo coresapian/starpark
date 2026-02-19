@@ -661,7 +661,13 @@ class LinkSpotDataPipeline:
                 logger.warning(f"OSM fallback query failed: {e}")
         
         # Return empty GeoDataFrame if all sources failed
-        logger.error("All building data sources failed")
+        logger.warning(
+            "All building data sources failed for location (%.4f, %.4f) radius=%dm. "
+            "Analysis will proceed with zero obstruction.",
+            lat,
+            lon,
+            int(radius_m),
+        )
         self.stats['errors'] += 1
         return gpd.GeoDataFrame(
             columns=['geometry', 'height', 'source'],

@@ -197,13 +197,13 @@ def _check_obstruction_engine_health(obstruction_engine: Any) -> ComponentHealth
     start_time = time.time()
     try:
         # Check if engine has required attributes
-        if hasattr(obstruction_engine, 'resolution'):
+        if hasattr(obstruction_engine, 'sector_width'):
             latency_ms = (time.time() - start_time) * 1000
             return ComponentHealth(
                 name="obstruction_engine",
                 status=ComponentStatus.HEALTHY,
                 latency_ms=round(latency_ms, 2),
-                message=f"Resolution: {obstruction_engine.resolution}",
+                message=f"Sector width: {obstruction_engine.sector_width}°, {obstruction_engine.n_sectors} sectors",
                 last_check=datetime.now(timezone.utc),
             )
         else:

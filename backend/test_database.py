@@ -88,7 +88,7 @@ def db_engine(database_url: str):
     # Enable PostGIS
     with engine.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS "uuid-ossp";"))
+        conn.execute(text('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'))
         conn.commit()
     
     # Create tables

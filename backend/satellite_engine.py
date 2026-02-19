@@ -620,6 +620,84 @@ class SatelliteEngine:
             cache_hit=cache_hit,
             source_url=self.tle_url
         )
+
+    def get_constellation_metadata(self) -> Dict[str, Any]:
+        """Derive constellation metadata from loaded TLE satellites."""
+        if not self._satellites:
+            try:
+                self.fetch_tle_data()
+            except Exception as e:
+                logger.warning("Could not fetch constellation metadata: %s", e)
+
+        if not self._satellites:
+            return {
+                "name": "Unknown",
+                "operator": "Unknown",
+                "total_satellites": 0,
+                "active_satellites": 0,
+                "orbital_planes": None,
+                "altitude_km": None,
+                "inclination_deg": None,
+            }
+
+        altitudes: List[float] = []
+        inclinations: List[float] = []
+        names: List[str] = []
+
+        for sat in self._satellites:
+            name = (getattr(sat, "name", "") or "").strip()
+            if name:
+                names.append(name)
+
+            model = getattr(sat, "model", None)
+            if model is None:
+                continue
+
+            mean_motion = getattr(model, "no_kozai", None)  # radians/minute
+            if mean_motion and mean_motion > 0:
+                try:
+                    n_rad_s = float(mean_motion) / 60.0
+                    mu = 398600.4418  # km^3/s^2
+                    semi_major_axis_km = (mu / (n_rad_s ** 2)) ** (1.0 / 3.0)
+                    altitude_km = semi_major_axis_km - EARTH_RADIUS_KM
+                    if 100.0 <= altitude_km <= 50000.0:
+                        altitudes.append(float(altitude_km))
+                except Exception:
+                    pass
+
+            inclo = getattr(model, "inclo", None)  # radians
+            if inclo is not None:
+                try:
+                    inclinations.append(float(np.degrees(float(inclo))))
+                except Exception:
+                    pass
+
+        names_upper = [n.upper() for n in names]
+        if any("STARLINK" in n for n in names_upper):
+            constellation_name = "Starlink"
+            operator = "SpaceX"
+        elif any("ONEWEB" in n for n in names_upper):
+            constellation_name = "OneWeb"
+            operator = "Eutelsat OneWeb"
+        elif any("IRIDIUM" in n for n in names_upper):
+            constellation_name = "Iridium"
+            operator = "Iridium"
+        else:
+            constellation_name = "Unknown"
+            operator = "Unknown"
+
+        median_altitude = float(np.median(altitudes)) if altitudes else None
+        median_inclination = float(np.median(inclinations)) if inclinations else None
+
+        return {
+            "name": constellation_name,
+            "operator": operator,
+            "total_satellites": len(self._satellites),
+            "active_satellites": len(self._satellites),
+            "orbital_planes": None,
+            "altitude_km": round(median_altitude, 1) if median_altitude is not None else None,
+            "inclination_deg": round(median_inclination, 1) if median_inclination is not None else None,
+        }
     
     def get_satellite_by_id(self, satellite_id: str) -> Optional[EarthSatellite]:
         """

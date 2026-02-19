@@ -8,6 +8,7 @@
 import hashlib
 import json
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -29,12 +30,16 @@ from dependencies import (
 from models.schemas import (
     AnalyzeRequest,
     AnalyzeResponse,
+    DataQuality,
     GeoJSONFeature,
     GeoJSONFeatureCollection,
     GeoJSONGeometry,
     HeatmapRequest,
     HeatmapResponse,
+    ObstructionPoint,
     ProblemDetail,
+    SatelliteDetail,
+    VisibilitySummary,
     Zone,
 )
 
@@ -63,6 +68,15 @@ def _generate_cache_key(prefix: str, params: dict) -> str:
     normalized = json.dumps(params, sort_keys=True, default=str)
     hash_value = hashlib.sha256(normalized.encode()).hexdigest()[:16]
     return f"{prefix}:{hash_value}"
+
+
+def _zone_to_status(zone: Zone) -> str:
+    """Map backend Zone enum to frontend status string."""
+    if zone in (Zone.EXCELLENT, Zone.GOOD):
+        return "clear"
+    if zone == Zone.FAIR:
+        return "marginal"
+    return "dead"
 
 
 def _classify_zone(clear_ratio: float) -> Zone:
@@ -189,18 +203,19 @@ async def analyze_position(
     """
     start_time = time.time()
     timestamp = body.timestamp or datetime.now(timezone.utc)
-    
+
     logger.info(
         f"[{request_id}] Starting analysis for lat={body.lat}, lon={body.lon}"
     )
-    
+
     try:
-        # Check cache first
+        # Check cache first (round timestamp to nearest minute for cache hits)
+        cache_ts = timestamp.replace(second=0, microsecond=0)
         cache_params = {
             "lat": round(body.lat, 6),
             "lon": round(body.lon, 6),
             "elevation": body.elevation,
-            "timestamp": timestamp.isoformat(),
+            "timestamp": cache_ts.isoformat(),
         }
         cache_key = _generate_cache_key("analyze", cache_params)
         
@@ -222,11 +237,16 @@ async def analyze_position(
         logger.debug(f"[{request_id}] Found {n_total} visible satellites")
         
         # Step 2: Fetch building and terrain data
-        buildings = await data_pipeline.fetch_buildings(
+        buildings_result = await data_pipeline.fetch_buildings(
             lat=body.lat,
             lon=body.lon,
             radius_m=1000.0,  # 1km radius for buildings
         )
+        if isinstance(buildings_result, tuple):
+            buildings, building_source = buildings_result
+        else:
+            buildings = buildings_result or []
+            building_source = "unknown"
         
         terrain = await data_pipeline.fetch_terrain(
             lat=body.lat,
@@ -253,11 +273,77 @@ async def analyze_position(
         n_total_calc = obstruction_result.get("n_total", n_total)
         obstruction_pct = obstruction_result["obstruction_pct"]
         blocked_azimuths = obstruction_result["blocked_azimuths"]
-        
+
+        # Build data-quality metadata for transparency
+        dq_sources = ["satellites"]
+        dq_warnings = []
+
+        if buildings:
+            building_quality = "full"
+            if building_source and building_source not in ("unknown", "none"):
+                dq_sources.append(f"buildings:{building_source}")
+            else:
+                dq_sources.append("buildings")
+        else:
+            building_quality = "none"
+            dq_warnings.append(
+                "No building data available - obstruction analysis may be inaccurate"
+            )
+
+        terrain_source = next(
+            (t.get("source") for t in terrain if isinstance(t, dict) and t.get("source")),
+            None,
+        )
+        if terrain:
+            terrain_quality = "full"
+            dq_sources.append(
+                f"terrain:{terrain_source}" if terrain_source else "terrain"
+            )
+        else:
+            terrain_quality = "none"
+            dq_warnings.append("Terrain elevation data unavailable")
+
+        data_quality = DataQuality(
+            buildings=building_quality,
+            terrain=terrain_quality,
+            satellites="live",
+            sources=dq_sources,
+            warnings=dq_warnings,
+        )
+
+        # Extract per-satellite details and obstruction profile
+        sat_details = obstruction_result.get("satellite_details", [])
+        obstruction_profile = obstruction_result.get("obstruction_profile", [])
+
+        satellites_out = [
+            SatelliteDetail(
+                id=sd["satellite_id"],
+                name=sd.get("name", ""),
+                azimuth=sd["azimuth"],
+                elevation=sd["elevation"],
+                range_km=sd.get("range_km"),
+                visible=sd.get("is_visible", True),
+                obstructed=sd.get("is_obstructed", False),
+            )
+            for sd in sat_details
+        ]
+
+        obstructions_out = [
+            ObstructionPoint(azimuth=op["azimuth"], elevation=op["elevation"])
+            for op in obstruction_profile
+        ]
+
+        n_obstructed = sum(1 for s in satellites_out if s.obstructed)
+        visibility = VisibilitySummary(
+            visible_satellites=n_clear,
+            obstructed_satellites=n_obstructed,
+            total_satellites=n_total_calc,
+        )
+
         # Calculate clear ratio and zone
         clear_ratio = n_clear / n_total_calc if n_total_calc > 0 else 0.0
         zone = _classify_zone(clear_ratio)
-        
+
         # Build response
         response = AnalyzeResponse(
             zone=zone,
@@ -269,6 +355,10 @@ async def analyze_position(
             lat=body.lat,
             lon=body.lon,
             elevation=body.elevation,
+            visibility=visibility,
+            satellites=satellites_out,
+            obstructions=obstructions_out,
+            data_quality=data_quality,
         )
         
         # Cache result
@@ -368,16 +458,17 @@ async def generate_heatmap(
     )
     
     try:
-        # Check cache first
+        # Check cache first (round timestamp to nearest minute for cache hits)
+        cache_ts = timestamp.replace(second=0, microsecond=0)
         cache_params = {
             "lat": round(body.lat, 6),
             "lon": round(body.lon, 6),
             "radius_m": body.radius_m,
             "spacing_m": body.spacing_m,
-            "timestamp": timestamp.isoformat(),
+            "timestamp": cache_ts.isoformat(),
         }
         cache_key = _generate_cache_key("heatmap", cache_params)
-        
+
         cached_result = await redis.get(cache_key)
         if cached_result:
             logger.info(f"[{request_id}] Cache hit for heatmap")
@@ -406,11 +497,16 @@ async def generate_heatmap(
         logger.info(f"[{request_id}] Analyzing {len(grid_points)} grid points")
         
         # Fetch buildings and terrain for the entire area
-        buildings = await data_pipeline.fetch_buildings(
+        buildings_result = await data_pipeline.fetch_buildings(
             lat=body.lat,
             lon=body.lon,
             radius_m=body.radius_m + 500.0,  # Extra margin
         )
+        if isinstance(buildings_result, tuple):
+            buildings, building_source = buildings_result
+        else:
+            buildings = buildings_result or []
+            building_source = "unknown"
         
         terrain = await data_pipeline.fetch_terrain(
             lat=body.lat,
@@ -425,7 +521,46 @@ async def generate_heatmap(
             elevation=0.0,
             timestamp=timestamp,
         )
+
+        # Build data-quality metadata for transparency
+        dq_sources = ["satellites"]
+        dq_warnings = []
+        if buildings:
+            building_quality = "full"
+            if building_source and building_source not in ("unknown", "none"):
+                dq_sources.append(f"buildings:{building_source}")
+            else:
+                dq_sources.append("buildings")
+        else:
+            building_quality = "none"
+            dq_warnings.append(
+                "No building data available - obstruction analysis may be inaccurate"
+            )
+
+        terrain_source = next(
+            (t.get("source") for t in terrain if isinstance(t, dict) and t.get("source")),
+            None,
+        )
+        if terrain:
+            terrain_quality = "full"
+            dq_sources.append(
+                f"terrain:{terrain_source}" if terrain_source else "terrain"
+            )
+        else:
+            terrain_quality = "none"
+            dq_warnings.append("Terrain elevation data unavailable")
+
+        data_quality = DataQuality(
+            buildings=building_quality,
+            terrain=terrain_quality,
+            satellites="live",
+            sources=dq_sources,
+            warnings=dq_warnings,
+        )
         
+        # Precompute half-cell sizes for polygon generation
+        half_lat = (body.spacing_m / 111000.0) / 2
+
         # Analyze each grid point
         features = []
         for idx, (lat, lon) in enumerate(grid_points):
@@ -438,22 +573,35 @@ async def generate_heatmap(
                 terrain=terrain,
                 satellites=satellites,
             )
-            
+
             n_clear = obstruction_result["n_clear"]
             n_total = obstruction_result["n_total"]
             obstruction_pct = obstruction_result["obstruction_pct"]
-            
+
             clear_ratio = n_clear / n_total if n_total > 0 else 0.0
             zone = _classify_zone(clear_ratio)
-            
-            # Create GeoJSON feature
+
+            # Build polygon cell (square) around grid point
+            half_lon = half_lat / max(math.cos(math.radians(lat)), 1e-10)
+            polygon_coords = [[
+                [lon - half_lon, lat - half_lat],
+                [lon + half_lon, lat - half_lat],
+                [lon + half_lon, lat + half_lat],
+                [lon - half_lon, lat + half_lat],
+                [lon - half_lon, lat - half_lat],
+            ]]
+
+            # Create GeoJSON feature with frontend-expected properties
             feature = GeoJSONFeature(
                 id=idx,
                 geometry=GeoJSONGeometry(
-                    type="Point",
-                    coordinates=[lon, lat],
+                    type="Polygon",
+                    coordinates=polygon_coords,
                 ),
                 properties={
+                    "status": _zone_to_status(zone),
+                    "visible_count": n_clear,
+                    "center": {"lat": lat, "lon": lon},
                     "zone": zone.value,
                     "n_clear": n_clear,
                     "n_total": n_total,
@@ -462,26 +610,35 @@ async def generate_heatmap(
                 },
             )
             features.append(feature)
-        
-        # Build response
+
+        # Convert buildings to GeoJSON features
+        building_features = []
+        for bidx, bldg in enumerate(buildings):
+            geom = bldg.get("geometry")
+            if geom:
+                building_features.append(GeoJSONFeature(
+                    id=f"b{bidx}",
+                    geometry=GeoJSONGeometry(**geom),
+                    properties={
+                        "height": bldg.get("height", 0),
+                    },
+                ))
+
+        # Build response matching frontend expectations
         response = HeatmapResponse(
-            type="FeatureCollection",
-            features=features,
-            metadata={
-                "center_lat": body.lat,
-                "center_lon": body.lon,
-                "radius_m": body.radius_m,
-                "spacing_m": body.spacing_m,
-                "total_points": len(grid_points),
-                "timestamp": timestamp.isoformat(),
-                "generation_time_ms": round((time.time() - start_time) * 1000, 2),
-            },
+            grid=GeoJSONFeatureCollection(features=features),
+            buildings=GeoJSONFeatureCollection(features=building_features),
+            center={"lat": body.lat, "lon": body.lon},
+            radius=body.radius_m,
+            resolution=body.spacing_m,
+            timestamp=timestamp.isoformat(),
+            data_quality=data_quality,
         )
-        
+
         # Cache result (longer TTL for heatmaps)
         await redis.setex(
             cache_key,
-            settings.cache_ttl_seconds * 2,  # Double TTL for heatmaps
+            settings.cache_ttl_seconds * 2,
             json.dumps(response.model_dump(mode="json")),
         )
         

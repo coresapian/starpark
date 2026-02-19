@@ -33,13 +33,13 @@ self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 `;
 
-// Script injected into <head> to stub out Service Worker registration,
-// add a Content-Security-Policy, and wrap geolocation with fallbacks.
+// Script injected into <head> to stub out Service Worker registration
+// and add a Content-Security-Policy.
 // Runs before any other scripts (Leaflet, app.js, etc.).
 const HEAD_INJECT = `
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' app:; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: blob: https://*.basemaps.cartocdn.com https://*.tile.openstreetmap.org https://unpkg.com; connect-src 'self' app: https://nominatim.openstreetmap.org https://ipapi.co https://freeipapi.com; font-src 'self' data:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' app:; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: blob: https://*.basemaps.cartocdn.com https://*.tile.openstreetmap.org https://unpkg.com; connect-src 'self' app: https://nominatim.openstreetmap.org; font-src 'self' data:;">
 <script>
-// 1. Stub navigator.serviceWorker.register — app:// doesn't support SW
+// Stub navigator.serviceWorker.register — app:// doesn't support SW
 if (navigator.serviceWorker) {
   const noop = () => Promise.resolve({ scope: '/', unregister: () => Promise.resolve(true) });
   Object.defineProperty(navigator, 'serviceWorker', {
@@ -54,83 +54,6 @@ if (navigator.serviceWorker) {
     configurable: true
   });
 }
-
-// 2. Wrap geolocation with robust fallback chain.
-//    navigator.geolocation is broken in Electron on macOS:
-//    - No Google API key → 403 from googleapis.com
-//    - macOS permission prompt often never fires, or hangs indefinitely
-//    Strategy: try native geo with a hard timeout, then fall back to
-//    IP geolocation via IPC (main process net.fetch, bypasses CORS).
-(function() {
-  if (!navigator.geolocation) return;
-  var _getCurrentPosition = navigator.geolocation.getCurrentPosition.bind(navigator.geolocation);
-
-  function ipFallback(success, error, originalErr) {
-    if (!window.electronAPI || !window.electronAPI.getIPLocation) {
-      if (error) error(originalErr);
-      return;
-    }
-    window.electronAPI.getIPLocation().then(function(loc) {
-      if (loc && loc.lat && loc.lon) {
-        success({
-          coords: {
-            latitude: loc.lat,
-            longitude: loc.lon,
-            accuracy: 5000,
-            altitude: null,
-            altitudeAccuracy: null,
-            heading: null,
-            speed: null
-          },
-          timestamp: Date.now()
-        });
-      } else if (error) {
-        error(originalErr);
-      }
-    }).catch(function() {
-      if (error) error(originalErr);
-    });
-  }
-
-  navigator.geolocation.getCurrentPosition = function(success, error, options) {
-    var settled = false;
-
-    // Hard timeout — macOS can hang indefinitely without calling either callback
-    var timeout = setTimeout(function() {
-      if (settled) return;
-      settled = true;
-      console.warn('[LinkSpot] Native geolocation timed out, using IP fallback');
-      var err = { code: 3, message: 'Geolocation timed out (Electron/macOS)' };
-      ipFallback(success, error, err);
-    }, 6000);
-
-    _getCurrentPosition(
-      function(pos) {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        success(pos);
-      },
-      function(err) {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-
-        if (err.code === 1 && window.electronAPI) {
-          // PERMISSION_DENIED — show system settings dialog, then IP fallback
-          window.electronAPI.promptLocationPermission();
-          ipFallback(success, error, err);
-          return;
-        }
-
-        // code 2 (POSITION_UNAVAILABLE / Google 403) or code 3 (TIMEOUT) — IP fallback
-        console.warn('[LinkSpot] Native geolocation failed (code ' + err.code + '), using IP fallback');
-        ipFallback(success, error, err);
-      },
-      options
-    );
-  };
-})();
 </script>`;
 
 /**
@@ -222,9 +145,15 @@ function serveStaticFile(pathname) {
   if (pathname === '/' || pathname === '') {
     filePath = path.join(FRONTEND_DIR, 'index.html');
   } else {
-    // Sanitize: prevent directory traversal
     const safePath = path.normalize(pathname).replace(/^(\.\.[\/\\])+/, '');
     filePath = path.join(FRONTEND_DIR, safePath);
+  }
+
+  // Prevent directory traversal — resolved path must stay within FRONTEND_DIR
+  const resolvedPath = path.resolve(filePath);
+  const resolvedFrontend = path.resolve(FRONTEND_DIR);
+  if (!resolvedPath.startsWith(resolvedFrontend + path.sep) && resolvedPath !== resolvedFrontend) {
+    filePath = path.join(FRONTEND_DIR, 'index.html');
   }
 
   // Check file exists

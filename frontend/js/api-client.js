@@ -19,9 +19,9 @@ class APIClient {
      */
     constructor(options = {}) {
         this.baseURL = options.baseURL || '/api/v1';
-        this.timeout = options.timeout || 10000;
-        this.maxRetries = options.maxRetries || 3;
-        this.retryDelay = options.retryDelay || 1000;
+        this.timeout = options.timeout || 30000;
+        this.maxRetries = options.maxRetries || 2;
+        this.retryDelay = options.retryDelay || 2000;
         
         // Request queue for offline support
         this.requestQueue = [];
@@ -154,6 +154,45 @@ class APIClient {
             this.requestQueue.push({ endpoint, options, resolve, reject });
         });
     }
+
+    /**
+     * Normalize a route location payload.
+     * Accepts either { lat, lon } or { address }.
+     * @private
+     * @param {Object} location - Route location object
+     * @param {string} label - Field name for error messages
+     * @returns {Object} Normalized location payload
+     */
+    normalizeRouteLocation(location, label) {
+        if (!location || typeof location !== 'object') {
+            throw new TypeError(`${label} must be an object`);
+        }
+
+        const address = typeof location.address === 'string'
+            ? location.address.trim()
+            : '';
+        if (address.length > 0) {
+            return { address };
+        }
+
+        const hasLat = location.lat !== undefined && location.lat !== null;
+        const hasLon = location.lon !== undefined && location.lon !== null;
+
+        if (hasLat !== hasLon) {
+            throw new TypeError(`${label} must include both lat and lon`);
+        }
+
+        if (hasLat && hasLon) {
+            const lat = Number.parseFloat(location.lat);
+            const lon = Number.parseFloat(location.lon);
+            if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+                throw new TypeError(`${label} lat/lon must be valid numbers`);
+            }
+            return { lat, lon };
+        }
+
+        throw new TypeError(`${label} must include either address or lat/lon`);
+    }
     
     // ============================================
     // API ENDPOINTS
@@ -256,6 +295,36 @@ class APIClient {
         }
         
         return this.request('/heatmap', {
+            method: 'POST',
+            body: JSON.stringify(body)
+        });
+    }
+
+    /**
+     * Plan a route and analyze satellite connectivity along the path.
+     * @param {Object} origin - { lat, lon } or { address }
+     * @param {Object} destination - { lat, lon } or { address }
+     * @param {number} [sampleInterval=500] - Sampling interval in meters
+     * @param {string|null} [timeUtc=null] - Optional ISO UTC timestamp
+     * @returns {Promise<Object>} Route plan response
+     */
+    async planRoute(origin, destination, sampleInterval = 500, timeUtc = null) {
+        const interval = Number.parseFloat(sampleInterval);
+        if (!Number.isFinite(interval) || interval <= 0) {
+            throw new TypeError('sampleInterval must be a positive number');
+        }
+
+        const body = {
+            origin: this.normalizeRouteLocation(origin, 'origin'),
+            destination: this.normalizeRouteLocation(destination, 'destination'),
+            sample_interval_m: interval
+        };
+
+        if (timeUtc) {
+            body.time_utc = timeUtc;
+        }
+
+        return this.request('/route/plan', {
             method: 'POST',
             body: JSON.stringify(body)
         });

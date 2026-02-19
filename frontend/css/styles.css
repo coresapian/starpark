@@ -1167,6 +1167,8 @@ body {
 @media print {
     .search-container,
     .gps-btn,
+    .route-plan-btn,
+    .route-summary-panel,
     .time-slider-container,
     .legend-container,
     .detail-panel,
@@ -1201,3 +1203,235 @@ body {
 .p-sm { padding: var(--space-sm); }
 .p-md { padding: var(--space-md); }
 .p-lg { padding: var(--space-lg); }
+
+/* ============================================
+   SCAN AREA BUTTON
+   ============================================ */
+
+.scan-area-btn {
+    position: fixed;
+    top: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 20px;
+    border: none;
+    border-radius: 24px;
+    background: #e94560;
+    color: white;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    z-index: 100;
+    transition: opacity 0.3s, transform 0.3s, background 0.15s;
+    opacity: 1;
+}
+
+.scan-area-btn:hover {
+    background: #d63851;
+    transform: translateX(-50%) scale(1.03);
+}
+
+.scan-area-btn:active {
+    transform: translateX(-50%) scale(0.97);
+}
+
+.scan-area-btn.hidden {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-50%) translateY(-10px);
+}
+
+/* ============================================
+   ROUTE PLAN BUTTON
+   ============================================ */
+
+.route-plan-btn {
+    position: fixed;
+    top: 126px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 20px;
+    border: none;
+    border-radius: 24px;
+    background: #0f3460;
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    z-index: 100;
+    transition: opacity 0.2s, transform 0.2s, background 0.15s;
+}
+
+.route-plan-btn:hover {
+    background: #144c8d;
+    transform: translateX(-50%) scale(1.03);
+}
+
+.route-plan-btn:active {
+    transform: translateX(-50%) scale(0.97);
+}
+
+.route-plan-btn.loading {
+    opacity: 0.7;
+    pointer-events: none;
+}
+
+/* ============================================
+   ROUTE SUMMARY PANEL
+   ============================================ */
+
+.route-summary-panel {
+    position: fixed;
+    top: 176px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(360px, calc(100% - 24px));
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(22, 33, 62, 0.94);
+    border: 1px solid rgba(233, 69, 96, 0.28);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    z-index: 101;
+}
+
+.route-summary-title {
+    margin: 0 0 8px 0;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-secondary);
+}
+
+.route-summary-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.route-summary-header .route-summary-title {
+    margin: 0;
+}
+
+.route-summary-clear {
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: rgba(0, 0, 0, 0.18);
+    color: var(--color-text-secondary);
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.route-summary-clear:hover {
+    color: #ffffff;
+    border-color: rgba(255, 255, 255, 0.35);
+    background: rgba(0, 0, 0, 0.3);
+}
+
+.route-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.route-summary-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: rgba(15, 52, 96, 0.48);
+}
+
+.route-summary-label {
+    font-size: 11px;
+    color: var(--color-text-secondary);
+}
+
+.route-summary-value {
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1.1;
+    color: var(--color-text-primary);
+    font-family: var(--font-mono);
+}
+
+.route-summary-toggle {
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+}
+
+.route-summary-toggle input {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--color-accent);
+    cursor: pointer;
+}
+
+/* ============================================
+   BACKEND STATUS BANNER
+   ============================================ */
+
+.backend-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: #D4A017;
+    color: #1a1a2e;
+    font-size: 14px;
+    font-weight: 500;
+    z-index: 500;
+}
+
+.backend-banner-icon {
+    font-size: 18px;
+}
+
+.backend-banner-text {
+    flex: 1;
+}
+
+.backend-banner-text code {
+    background: rgba(0,0,0,0.15);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: monospace;
+}
+
+.backend-banner-retry,
+.backend-banner-close {
+    border: none;
+    background: rgba(0,0,0,0.15);
+    color: inherit;
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+}
+
+.backend-banner-retry:hover,
+.backend-banner-close:hover {
+    background: rgba(0,0,0,0.25);
+}

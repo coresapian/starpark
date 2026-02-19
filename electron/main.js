@@ -47,7 +47,7 @@ function createMainWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   });
 
@@ -70,6 +70,7 @@ function createMainWindow() {
           if (window.linkSpotApp && window.linkSpotApp.state.currentPosition) {
             const pos = window.linkSpotApp.state.currentPosition;
             window.linkSpotApp.state.lastHeatMapRequest = null;
+            window.linkSpotApp.state.lastScannedCenter = null;
             window.linkSpotApp.loadHeatMap(pos.lat, pos.lon);
           }
         });
@@ -115,7 +116,7 @@ function createSettingsWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   });
 
@@ -143,7 +144,15 @@ ipcMain.handle('get-settings', () => {
 
 ipcMain.handle('set-settings', (_event, settings) => {
   if (settings.backendURL !== undefined) {
-    store.set('backendURL', settings.backendURL);
+    try {
+      const parsed = new URL(settings.backendURL);
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        return { success: false, error: 'Backend URL must use HTTP or HTTPS' };
+      }
+      store.set('backendURL', settings.backendURL);
+    } catch {
+      return { success: false, error: 'Invalid URL format' };
+    }
   }
   if (settings.notifications !== undefined) {
     store.set('notifications', settings.notifications);
@@ -162,7 +171,10 @@ ipcMain.handle('set-settings', (_event, settings) => {
 
 ipcMain.handle('test-backend', async (_event, url) => {
   try {
-    const { net } = require('electron');
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return { success: false, error: 'Only HTTP/HTTPS URLs are allowed' };
+    }
     const response = await net.fetch(`${url}/api/v1/health`, {
       method: 'GET'
     });
@@ -171,34 +183,6 @@ ipcMain.handle('test-backend', async (_event, url) => {
   } catch (error) {
     return { success: false, error: error.message };
   }
-});
-
-ipcMain.handle('get-ip-location', async () => {
-  const services = [
-    {
-      url: 'https://ipapi.co/json/',
-      parse: (d) => d.latitude && d.longitude ? { lat: d.latitude, lon: d.longitude, city: d.city } : null
-    },
-    {
-      url: 'https://freeipapi.com/api/json',
-      parse: (d) => d.latitude && d.longitude ? { lat: d.latitude, lon: d.longitude, city: d.cityName } : null
-    }
-  ];
-
-  for (const svc of services) {
-    try {
-      const resp = await net.fetch(svc.url, { method: 'GET' });
-      const data = await resp.json();
-      const result = svc.parse(data);
-      if (result) {
-        log.info(`IP geolocation: ${result.lat}, ${result.lon} (${result.city || 'unknown'})`);
-        return result;
-      }
-    } catch (err) {
-      log.warn(`IP geolocation failed for ${svc.url}:`, err.message);
-    }
-  }
-  return null;
 });
 
 ipcMain.handle('prompt-location-permission', async () => {
@@ -297,6 +281,28 @@ app.whenReady().then(() => {
 
   // Setup auto-updater
   setupUpdater();
+
+  // Periodic backend health check — broadcast status to renderer
+  let lastBackendStatus = null;
+  async function checkBackend() {
+    const backendURL = store.get('backendURL');
+    let status;
+    try {
+      const response = await net.fetch(`${backendURL}/api/v1/health`, { method: 'GET' });
+      await response.json();
+      status = { connected: true };
+    } catch {
+      status = { connected: false };
+    }
+    if (JSON.stringify(status) !== JSON.stringify(lastBackendStatus)) {
+      lastBackendStatus = status;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('backend-status', status);
+      }
+    }
+  }
+  checkBackend();
+  setInterval(checkBackend, 30000);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

@@ -16,7 +16,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   testBackend: (url) => ipcRenderer.invoke('test-backend', url),
 
   // Location & Permissions
-  getIPLocation: () => ipcRenderer.invoke('get-ip-location'),
   promptLocationPermission: () => ipcRenderer.invoke('prompt-location-permission'),
 
   // Notifications

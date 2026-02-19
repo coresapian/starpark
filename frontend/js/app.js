@@ -21,9 +21,10 @@ class LinkSpotApp {
         // Configuration
         this.config = {
             apiBaseURL: options.apiBaseURL || '/api/v1',
-            initialPosition: options.initialPosition || { lat: 40.7128, lon: -74.0060, zoom: 16 },
+            initialPosition: options.initialPosition || { lat: 39.8283, lon: -98.5795, zoom: 4 },
             gridResolution: options.gridResolution || 50,
             heatMapRadius: options.heatMapRadius || 500,
+            routeSampleInterval: options.routeSampleInterval || 500,
             timeSliderStep: 15, // minutes
             animationInterval: 500 // ms between frames
         };
@@ -37,10 +38,15 @@ class LinkSpotApp {
             isLoading: false,
             gridLayer: null,
             buildingLayer: null,
+            routeLayer: null,
+            waypointLayer: null,
+            deadZoneLayer: null,
+            routePlan: null,
             selectedPoint: null,
             searchDebounceTimer: null,
             animationTimer: null,
-            lastHeatMapRequest: null
+            lastHeatMapRequest: null,
+            lastScannedCenter: null
         };
         
         // API Client
@@ -83,7 +89,11 @@ class LinkSpotApp {
         
         // Set initial time
         this.setCurrentTime(new Date());
+        this.updateRoutePlanButtonState();
         
+        // Check backend connectivity
+        await this.checkBackendHealth();
+
         // Try to get user's location
         await this.centerOnGPS();
         
@@ -98,6 +108,17 @@ class LinkSpotApp {
         // Hide loading overlay
         this.setLoading(false);
         
+        // Listen for Electron backend status updates
+        if (window.electronAPI && window.electronAPI.onBackendStatus) {
+            window.electronAPI.onBackendStatus((status) => {
+                if (status.connected) {
+                    this._hideBackendBanner();
+                } else {
+                    this._showBackendBanner();
+                }
+            });
+        }
+
         console.log('[LinkSpot] Initialized successfully');
     }
     
@@ -115,6 +136,13 @@ class LinkSpotApp {
             searchClear: document.getElementById('search-clear'),
             searchResults: document.getElementById('search-results'),
             gpsBtn: document.getElementById('gps-btn'),
+            routePlanBtn: document.getElementById('route-plan-btn'),
+            routeSummaryPanel: document.getElementById('route-summary-panel'),
+            routeSummaryDistance: document.getElementById('route-summary-distance'),
+            routeSummaryEta: document.getElementById('route-summary-eta'),
+            routeSummaryDeadZone: document.getElementById('route-summary-deadzone'),
+            routeSummaryWaypoints: document.getElementById('route-summary-waypoints'),
+            routeSummaryClear: document.getElementById('route-summary-clear'),
             timeSlider: document.getElementById('time-slider'),
             currentTime: document.getElementById('current-time'),
             playBtn: document.getElementById('play-btn'),
@@ -131,7 +159,8 @@ class LinkSpotApp {
             skyPlotCanvas: document.getElementById('sky-plot'),
             satelliteList: document.getElementById('satellite-list'),
             analysisStats: document.getElementById('analysis-stats'),
-            toastContainer: document.getElementById('toast-container')
+            toastContainer: document.getElementById('toast-container'),
+            scanAreaBtn: document.getElementById('scan-area-btn')
         };
     }
     
@@ -161,23 +190,27 @@ class LinkSpotApp {
             maxZoom: 20
         }).addTo(this.state.map);
         
-        // Store initial position
-        this.state.currentPosition = { lat, lon };
-        
-        // Setup map event handlers
+        // currentPosition is only set by GPS or search — never from defaults
+        this.state.currentPosition = null;
+
+        // Show "Scan this area" button when map pans away from last scan
         this.state.map.on('moveend', () => {
+            if (!this.state.currentPosition) return;
             const center = this.state.map.getCenter();
             this.state.currentPosition = { lat: center.lat, lon: center.lng };
-        });
-        
-        // Debounced heat map load on map move
-        let moveTimeout;
-        this.state.map.on('moveend', () => {
-            clearTimeout(moveTimeout);
-            moveTimeout = setTimeout(() => {
-                const center = this.state.map.getCenter();
-                this.loadHeatMap(center.lat, center.lng);
-            }, 500);
+            this.updateRoutePlanButtonState();
+
+            if (this.state.lastScannedCenter) {
+                const dist = this._haversineDistance(
+                    this.state.lastScannedCenter.lat, this.state.lastScannedCenter.lon,
+                    center.lat, center.lng
+                );
+                if (dist > this.config.heatMapRadius * 0.25) {
+                    this.elements.scanAreaBtn.classList.remove('hidden');
+                } else {
+                    this.elements.scanAreaBtn.classList.add('hidden');
+                }
+            }
         });
     }
     
@@ -210,11 +243,16 @@ class LinkSpotApp {
         // Search events
         this.elements.searchInput.addEventListener('input', (e) => {
             this.handleSearchInput(e.target.value);
+            this.updateRoutePlanButtonState();
         });
         
         this.elements.searchInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
-                this.searchLocation(this.elements.searchInput.value);
+                if (e.shiftKey) {
+                    this.planRouteFromSearch();
+                } else {
+                    this.searchLocation(this.elements.searchInput.value);
+                }
             }
         });
         
@@ -229,6 +267,25 @@ class LinkSpotApp {
         // GPS button
         this.elements.gpsBtn.addEventListener('click', () => {
             this.centerOnGPS();
+        });
+
+        // Route planning button
+        this.elements.routePlanBtn.addEventListener('click', () => {
+            this.planRouteFromSearch();
+        });
+
+        // Route summary clear button
+        if (this.elements.routeSummaryClear) {
+            this.elements.routeSummaryClear.addEventListener('click', () => {
+                this.clearRoutePlan();
+            });
+        }
+
+        // Scan area button
+        this.elements.scanAreaBtn.addEventListener('click', () => {
+            const center = this.state.map.getCenter();
+            this.elements.scanAreaBtn.classList.add('hidden');
+            this.loadHeatMap(center.lat, center.lng);
         });
         
         // Time slider
@@ -284,31 +341,42 @@ class LinkSpotApp {
      * @returns {Promise<void>}
      */
     async loadHeatMap(lat, lon) {
-        // Prevent duplicate requests
-        const requestKey = `${lat.toFixed(4)},${lon.toFixed(4)},${this.state.currentTimestamp}`;
+        // Prevent duplicate requests for the same position
+        const requestKey = `${lat.toFixed(4)},${lon.toFixed(4)}`;
         if (requestKey === this.state.lastHeatMapRequest) {
             return;
         }
+
+        // Prevent concurrent requests
+        if (this._heatmapLoading) {
+            return;
+        }
+
         this.state.lastHeatMapRequest = requestKey;
-        
+        this.state.lastScannedCenter = { lat, lon };
+        this.elements.scanAreaBtn.classList.add('hidden');
+        this._heatmapLoading = true;
         this.setLoading(true);
-        
+
         try {
             const data = await this.api.getHeatMap(
                 lat,
                 lon,
                 this.config.heatMapRadius,
-                this.state.currentTimestamp,
+                null, // timestamp omitted — server uses current time
                 this.config.gridResolution
             );
-            
+
             this.renderGridCells(data.grid);
             this.renderBuildings(data.buildings);
-            
+
         } catch (error) {
             console.error('[LinkSpot] Failed to load heat map:', error);
             this.showToast('Failed to load heat map data', 'error');
+            // Clear the request key so the user can retry
+            this.state.lastHeatMapRequest = null;
         } finally {
+            this._heatmapLoading = false;
             this.setLoading(false);
         }
     }
@@ -386,6 +454,281 @@ class LinkSpotApp {
             this.state.buildingLayer.bringToBack();
         }
     }
+
+    /**
+     * Update route-planning trigger visibility.
+     * Requires current map position + destination text.
+     */
+    updateRoutePlanButtonState() {
+        if (!this.elements.routePlanBtn) return;
+        const hasOrigin = !!this.state.currentPosition;
+        const hasDestinationText = this.elements.searchInput.value.trim().length > 1;
+        this.elements.routePlanBtn.classList.toggle('hidden', !(hasOrigin && hasDestinationText));
+    }
+
+    /**
+     * Remove all currently rendered route layers.
+     */
+    clearRoutePlan() {
+        this.resetRouteSummaryPanel();
+        if (!this.state.map) {
+            this.state.routePlan = null;
+            return;
+        }
+
+        if (this.state.routeLayer) {
+            this.state.map.removeLayer(this.state.routeLayer);
+            this.state.routeLayer = null;
+        }
+        if (this.state.waypointLayer) {
+            this.state.map.removeLayer(this.state.waypointLayer);
+            this.state.waypointLayer = null;
+        }
+        if (this.state.deadZoneLayer) {
+            this.state.map.removeLayer(this.state.deadZoneLayer);
+            this.state.deadZoneLayer = null;
+        }
+        this.state.routePlan = null;
+    }
+
+    /**
+     * Reset and hide the route summary panel.
+     */
+    resetRouteSummaryPanel() {
+        if (!this.elements.routeSummaryPanel) return;
+        this.elements.routeSummaryDistance.textContent = '--';
+        this.elements.routeSummaryEta.textContent = '--';
+        this.elements.routeSummaryDeadZone.textContent = '--';
+        this.elements.routeSummaryWaypoints.textContent = '--';
+        this.elements.routeSummaryPanel.classList.add('hidden');
+    }
+
+    /**
+     * Update route summary panel from route planning response.
+     * @param {Object} routePlan
+     */
+    updateRouteSummaryPanel(routePlan) {
+        if (!this.elements.routeSummaryPanel) return;
+        const summary = routePlan?.mission_summary || {};
+        const totalDistance = Number(summary.total_distance_m || 0);
+        const durationSec = Number(summary.total_duration_s || 0);
+        const deadZoneDistance = Number(summary.dead_zone_total_m || 0);
+        const waypointCount = Number(summary.num_waypoints || 0);
+
+        const distanceText = totalDistance >= 1000
+            ? `${(totalDistance / 1000).toFixed(1)} km`
+            : `${Math.round(totalDistance)} m`;
+        const etaText = this.formatDuration(durationSec);
+        const deadZonePct = totalDistance > 0
+            ? ((deadZoneDistance / totalDistance) * 100).toFixed(1)
+            : '0.0';
+
+        this.elements.routeSummaryDistance.textContent = distanceText;
+        this.elements.routeSummaryEta.textContent = etaText;
+        this.elements.routeSummaryDeadZone.textContent = `${deadZonePct}%`;
+        this.elements.routeSummaryWaypoints.textContent = `${waypointCount}`;
+        this.elements.routeSummaryPanel.classList.remove('hidden');
+    }
+
+    /**
+     * Format duration seconds to compact h/m form.
+     * @param {number} seconds
+     * @returns {string}
+     */
+    formatDuration(seconds) {
+        if (!Number.isFinite(seconds) || seconds <= 0) return '--';
+        const totalMinutes = Math.round(seconds / 60);
+        const hours = Math.floor(totalMinutes / 60);
+        const minutes = totalMinutes % 60;
+        if (hours > 0 && minutes > 0) return `${hours}h ${minutes}m`;
+        if (hours > 0) return `${hours}h`;
+        return `${minutes}m`;
+    }
+
+    /**
+     * Plan a route from current position to the search destination.
+     */
+    async planRouteFromSearch() {
+        const destinationText = this.elements.searchInput.value.trim();
+        if (!destinationText) {
+            this.showToast('Enter a destination in search to plan a route', 'warning');
+            return;
+        }
+
+        const origin = this.state.currentPosition
+            || (this.state.map ? this.state.map.getCenter() : null);
+        if (!origin) {
+            this.showToast('Set your origin first (GPS or map position)', 'warning');
+            return;
+        }
+
+        // Support "lat,lon" destination shortcuts in addition to addresses.
+        let destination = { address: destinationText };
+        const coordMatch = destinationText.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
+        if (coordMatch) {
+            destination = {
+                lat: parseFloat(coordMatch[1]),
+                lon: parseFloat(coordMatch[2])
+            };
+        }
+
+        await this.loadRoutePlan(
+            { lat: origin.lat, lon: origin.lon },
+            destination
+        );
+    }
+
+    /**
+     * Fetch and render route-planning analysis from backend.
+     * @param {{lat:number, lon:number}|{address:string}} origin
+     * @param {{lat:number, lon:number}|{address:string}} destination
+     */
+    async loadRoutePlan(origin, destination) {
+        if (this._routeLoading) return;
+        this._routeLoading = true;
+        this.setLoading(true);
+        if (this.elements.routePlanBtn) {
+            this.elements.routePlanBtn.classList.add('loading');
+        }
+
+        try {
+            const routePlan = await this.api.planRoute(
+                origin,
+                destination,
+                this.config.routeSampleInterval,
+                this.state.currentTimestamp
+            );
+            this.state.routePlan = routePlan;
+            this.renderRoutePlan(routePlan);
+            this.updateRouteSummaryPanel(routePlan);
+        } catch (error) {
+            console.error('[LinkSpot] Route planning failed:', error);
+            this.showToast('Failed to plan route', 'error');
+        } finally {
+            this._routeLoading = false;
+            this.setLoading(false);
+            if (this.elements.routePlanBtn) {
+                this.elements.routePlanBtn.classList.remove('loading');
+            }
+        }
+    }
+
+    /**
+     * Render route segments, waypoints, and dead zones.
+     * @param {Object} routePlan
+     */
+    renderRoutePlan(routePlan) {
+        this.clearRoutePlan();
+        if (!routePlan || !this.state.map) return;
+
+        const routeGeoJson = routePlan.route_geojson;
+        if (routeGeoJson && Array.isArray(routeGeoJson.features)) {
+            this.state.routeLayer = L.geoJSON(routeGeoJson, {
+                style: (feature) => this.getRouteSegmentStyle(feature?.properties?.signal),
+                onEachFeature: (feature, layer) => {
+                    const props = feature.properties || {};
+                    const signal = props.signal || 'dead';
+                    const visible = props.visible_satellites ?? 0;
+                    const total = props.total_satellites ?? 0;
+                    layer.bindTooltip(
+                        `<strong>${signal.toUpperCase()}</strong><br>${visible}/${total} satellites`,
+                        { direction: 'top', offset: [0, -6] }
+                    );
+                }
+            }).addTo(this.state.map);
+        }
+
+        const waypoints = Array.isArray(routePlan.waypoints) ? routePlan.waypoints : [];
+        this.state.waypointLayer = L.layerGroup();
+        waypoints.forEach((wp) => {
+            const color = this.getZoneColor(wp.zone);
+            const marker = L.circleMarker([wp.lat, wp.lon], {
+                radius: 7,
+                color: '#ffffff',
+                weight: 2,
+                fillColor: color,
+                fillOpacity: 0.95
+            });
+            const etaMin = wp.eta_seconds ? Math.round(wp.eta_seconds / 60) : 0;
+            marker.bindPopup(
+                `<strong>${this.escapeHtml(wp.name || wp.id)}</strong><br>` +
+                `${this.escapeHtml((wp.type || 'stop').replace('_', ' '))}<br>` +
+                `Coverage: ${Math.round(wp.coverage_pct || 0)}%<br>` +
+                `Sats: ${wp.visible_satellites || 0}/${wp.total_satellites || 0}<br>` +
+                `ETA: ${etaMin} min`
+            );
+            marker.addTo(this.state.waypointLayer);
+        });
+        this.state.waypointLayer.addTo(this.state.map);
+
+        const deadZones = Array.isArray(routePlan.dead_zones) ? routePlan.dead_zones : [];
+        this.state.deadZoneLayer = L.layerGroup();
+        deadZones.forEach((dz) => {
+            const deadLine = L.polyline(
+                [[dz.start_lat, dz.start_lon], [dz.end_lat, dz.end_lon]],
+                {
+                    color: '#C0392B',
+                    weight: 6,
+                    opacity: 0.9,
+                    dashArray: '8 8'
+                }
+            );
+            deadLine.bindTooltip(
+                `<strong>Dead Zone</strong><br>Length: ${(dz.length_m / 1000).toFixed(2)} km`
+            );
+            deadLine.addTo(this.state.deadZoneLayer);
+        });
+        this.state.deadZoneLayer.addTo(this.state.map);
+
+        if (this.state.routeLayer && this.state.routeLayer.getBounds().isValid()) {
+            this.state.map.fitBounds(this.state.routeLayer.getBounds(), {
+                padding: [36, 36],
+                maxZoom: 15
+            });
+        }
+
+        if (this.state.routeLayer) {
+            this.state.routeLayer.bringToFront();
+        }
+        if (this.state.deadZoneLayer) {
+            this.state.deadZoneLayer.bringToFront();
+        }
+        if (this.state.waypointLayer) {
+            this.state.waypointLayer.bringToFront();
+        }
+    }
+
+    /**
+     * Segment styling for route signal classes.
+     * @param {string} signal
+     * @returns {Object} Leaflet polyline style
+     */
+    getRouteSegmentStyle(signal) {
+        const colors = {
+            clear: '#2E8B57',
+            marginal: '#D4A017',
+            dead: '#C0392B'
+        };
+        return {
+            color: colors[signal] || '#6c757d',
+            weight: 5,
+            opacity: 0.88,
+            lineCap: 'round',
+            lineJoin: 'round'
+        };
+    }
+
+    /**
+     * Color map for waypoint zone values.
+     * @param {string} zone
+     * @returns {string}
+     */
+    getZoneColor(zone) {
+        const value = (zone || '').toLowerCase();
+        if (value === 'excellent' || value === 'good') return '#2E8B57';
+        if (value === 'fair') return '#D4A017';
+        return '#C0392B';
+    }
     
     // ============================================
     // TIME SLIDER
@@ -419,7 +762,7 @@ class LinkSpotApp {
         const totalMinutes = sliderValue * this.config.timeSliderStep;
         const hours = Math.floor(totalMinutes / 60);
         const minutes = totalMinutes % 60;
-        
+
         // Create new date with selected time
         const now = new Date();
         const newDate = new Date(
@@ -429,16 +772,11 @@ class LinkSpotApp {
             hours,
             minutes
         );
-        
+
         this.setCurrentTime(newDate);
-        
-        // Reload heat map with new time
-        if (this.state.currentPosition) {
-            this.loadHeatMap(
-                this.state.currentPosition.lat,
-                this.state.currentPosition.lon
-            );
-        }
+
+        // Heatmap only refreshes when position changes, not on time change.
+        // Satellite geometry shifts negligibly over hours for a fixed location.
     }
     
     /**
@@ -583,6 +921,7 @@ class LinkSpotApp {
         // Center map
         this.state.map.setView([lat, lon], 17);
         this.state.currentPosition = { lat, lon };
+        this.updateRoutePlanButtonState();
         
         // Load heat map
         this.loadHeatMap(lat, lon);
@@ -605,6 +944,7 @@ class LinkSpotApp {
         this.elements.searchInput.value = '';
         this.elements.searchClear.classList.add('hidden');
         this.hideSearchResults();
+        this.updateRoutePlanButtonState();
         this.elements.searchInput.focus();
     }
     
@@ -675,6 +1015,7 @@ class LinkSpotApp {
             // Center map
             this.state.map.setView([latitude, longitude], 17);
             this.state.currentPosition = { lat: latitude, lon: longitude };
+            this.updateRoutePlanButtonState();
             
             // Add marker
             L.marker([latitude, longitude])
@@ -773,7 +1114,7 @@ class LinkSpotApp {
                     <span class="satellite-name">${sat.name || sat.id}</span>
                     <span class="satellite-info">
                         <span class="satellite-elevation">${Math.round(sat.elevation)}°</span>
-                        <span class="satellite-snr ${this.getSNRClass(sat.snr)}">${sat.snr} dB</span>
+                        <span class="satellite-snr ${this.getSNRClass(sat.snr)}">${sat.snr != null ? sat.snr + ' dB' : '--'}</span>
                     </span>
                 </li>
             `).join('');
@@ -809,6 +1150,7 @@ class LinkSpotApp {
      * @returns {string} CSS class name
      */
     getSNRClass(snr) {
+        if (snr == null) return 'unknown';
         if (snr >= 40) return 'good';
         if (snr >= 30) return 'moderate';
         return 'poor';
@@ -918,6 +1260,63 @@ class LinkSpotApp {
         this.showToast('You are offline', 'warning');
     }
     
+    /**
+     * Check backend connectivity and show banner if unavailable
+     * @private
+     */
+    async checkBackendHealth() {
+        try {
+            await this.api.healthCheck();
+            this._hideBackendBanner();
+        } catch (error) {
+            this._showBackendBanner();
+        }
+    }
+
+    /** @private */
+    _showBackendBanner() {
+        let banner = document.getElementById('backend-banner');
+        if (banner) return;
+        banner = document.createElement('div');
+        banner.id = 'backend-banner';
+        banner.className = 'backend-banner';
+
+        const isElectron = window.electronAPI && window.electronAPI.isElectron;
+        const message = isElectron
+            ? 'Backend unavailable. Start the backend with <code>make up</code> or update the URL in Preferences.'
+            : 'Backend unavailable. Ensure the server is running.';
+
+        banner.innerHTML =
+            '<span class="backend-banner-icon">&#9888;</span>' +
+            '<span class="backend-banner-text">' + message + '</span>' +
+            '<button class="backend-banner-retry" id="backend-retry-btn">Retry</button>' +
+            '<button class="backend-banner-close" id="backend-close-btn" aria-label="Dismiss">&times;</button>';
+        document.body.prepend(banner);
+
+        document.getElementById('backend-retry-btn').addEventListener('click', () => this.checkBackendHealth());
+        document.getElementById('backend-close-btn').addEventListener('click', () => banner.remove());
+    }
+
+    /** @private */
+    _hideBackendBanner() {
+        const banner = document.getElementById('backend-banner');
+        if (banner) banner.remove();
+    }
+
+    /**
+     * Approximate distance between two points in meters (haversine)
+     * @private
+     */
+    _haversineDistance(lat1, lon1, lat2, lon2) {
+        const R = 6371000;
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLon = (lon2 - lon1) * Math.PI / 180;
+        const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                  Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                  Math.sin(dLon/2) * Math.sin(dLon/2);
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
     // ============================================
     // CLEANUP
     // ============================================
@@ -928,6 +1327,9 @@ class LinkSpotApp {
     destroy() {
         // Stop animation
         this.stopAnimation();
+
+        // Remove route overlays
+        this.clearRoutePlan();
         
         // Remove event listeners
         window.removeEventListener('resize', this.handleResize);
@@ -965,11 +1367,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Create and initialize app
     window.linkSpotApp = new LinkSpotApp({
         apiBaseURL: '/api/v1',
-        initialPosition: {
-            lat: parseFloat(urlParams.get('lat')) || 40.7128,
-            lon: parseFloat(urlParams.get('lon')) || -74.0060,
+        initialPosition: urlParams.get('lat') && urlParams.get('lon') ? {
+            lat: parseFloat(urlParams.get('lat')),
+            lon: parseFloat(urlParams.get('lon')),
             zoom: parseInt(urlParams.get('zoom'), 10) || 16
-        }
+        } : undefined
     });
     
     window.linkSpotApp.init().then(() => {

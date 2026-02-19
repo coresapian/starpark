@@ -23,7 +23,7 @@ from config import settings
 from dependencies import close_dependencies, get_db_pool, get_redis_pool
 from middleware.rate_limit import RateLimitMiddleware
 from models.schemas import ProblemDetail
-from routers import analysis, health, satellites
+from routers import analysis, health, route, satellites
 
 # ============================================================================
 # Logging Configuration
@@ -194,6 +194,7 @@ def create_application() -> FastAPI:
     # Include routers
     app.include_router(analysis.router)
     app.include_router(satellites.router)
+    app.include_router(route.router)
     app.include_router(health.router)
     
     return app

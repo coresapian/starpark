@@ -29,6 +29,7 @@ import math
 
 # Geohash character set (base32)
 GEOHASH_CHARS = '0123456789bcdefghjkmnpqrstuvwxyz'
+BASE32_CHARS = GEOHASH_CHARS
 
 # Approximate cell dimensions at each precision level (latitude ~45°)
 # Format: (width_km, height_km)
@@ -360,23 +361,101 @@ def get_parent_geohash(geohash: str) -> Optional[str]:
     return geohash[:-1]
 
 
-def get_common_prefix(geohashes: List[str]) -> str:
+def get_common_prefix(
+    geohashes: List[str] | str,
+    *more_geohashes: str,
+) -> str:
     """Find the common prefix of multiple geohashes.
-    
-    Args:
-        geohashes: List of geohash strings
-    
-    Returns:
-        Common prefix string (may be empty)
+
+    Accepts either a list of geohashes or positional geohash arguments.
     """
-    if not geohashes:
+    if isinstance(geohashes, str):
+        values = [geohashes, *more_geohashes]
+    else:
+        values = list(geohashes)
+        if more_geohashes:
+            values.extend(more_geohashes)
+
+    if not values:
         return ''
     
     prefix = []
-    for chars in zip(*geohashes):
+    for chars in zip(*values):
         if len(set(chars)) == 1:
             prefix.append(chars[0])
         else:
             break
     
     return ''.join(prefix)
+
+
+def geohash_to_bbox(geohash: str) -> Tuple[float, float, float, float]:
+    """Backward-compatible alias for get_geohash_bounds()."""
+    return get_geohash_bounds(geohash)
+
+
+def bbox_to_geohashes(
+    min_lat: float,
+    min_lon: float,
+    max_lat: float,
+    max_lon: float,
+    precision: int = 6,
+) -> List[str]:
+    """Generate geohashes that cover a bounding box."""
+    if min_lat > max_lat or min_lon > max_lon:
+        raise ValueError("Invalid bbox: min values must be <= max values")
+
+    center_lat = (min_lat + max_lat) / 2.0
+    center_lon = (min_lon + max_lon) / 2.0
+    sample = encode_geohash(center_lat, center_lon, precision)
+    s_min_lat, s_min_lon, s_max_lat, s_max_lon = get_geohash_bounds(sample)
+    lat_step = max((s_max_lat - s_min_lat) / 2.0, 1e-6)
+    lon_step = max((s_max_lon - s_min_lon) / 2.0, 1e-6)
+
+    geohashes: Set[str] = set()
+    lat = min_lat
+    while lat <= max_lat + lat_step:
+        lon = min_lon
+        while lon <= max_lon + lon_step:
+            geohashes.add(encode_geohash(lat, lon, precision))
+            lon += lon_step
+        lat += lat_step
+
+    return sorted(geohashes)
+
+
+def get_precision_for_radius(radius_m: float) -> int:
+    """Backward-compatible alias for get_geohash_precision_for_radius()."""
+    return get_geohash_precision_for_radius(radius_m)
+
+
+def are_neighbors(geohash1: str, geohash2: str) -> bool:
+    """Backward-compatible alias for are_geohashes_adjacent()."""
+    return are_geohashes_adjacent(geohash1, geohash2)
+
+
+def get_parent(geohash: str) -> Optional[str]:
+    """Backward-compatible alias for get_parent_geohash()."""
+    return get_parent_geohash(geohash)
+
+
+def get_children(geohash: str) -> List[str]:
+    """Return all 32 one-level child geohashes."""
+    return [f"{geohash}{char}" for char in GEOHASH_CHARS]
+
+
+def get_geohash_area(geohash: str) -> float:
+    """Approximate geohash cell area in square meters."""
+    min_lat, min_lon, max_lat, max_lon = get_geohash_bounds(geohash)
+    width_m = haversine_distance(min_lat, min_lon, min_lat, max_lon)
+    height_m = haversine_distance(min_lat, min_lon, max_lat, min_lon)
+    return width_m * height_m
+
+
+def encode_geohash_vectorized(
+    lats: List[float],
+    lons: List[float],
+    precision: int = 6,
+) -> List[str]:
+    """Vectorized geohash encoder for array-like inputs."""
+    return [encode_geohash(float(lat), float(lon), precision) for lat, lon in zip(lats, lons)]

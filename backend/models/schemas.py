@@ -10,7 +10,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class Zone(str, Enum):
@@ -28,7 +28,7 @@ class GeoJSONGeometry(BaseModel):
     
     model_config = ConfigDict(extra="allow")
     
-    type: Literal["Point", "Polygon", "MultiPolygon"] = Field(
+    type: Literal["Point", "LineString", "Polygon", "MultiPolygon"] = Field(
         ..., description="Geometry type"
     )
     coordinates: list[Any] = Field(
@@ -128,25 +128,63 @@ class AnalyzeRequest(BaseModel):
         return v
 
 
+class VisibilitySummary(BaseModel):
+    """Aggregate visibility counts for the detail panel."""
+
+    visible_satellites: int = Field(..., ge=0, description="Satellites with clear LOS")
+    obstructed_satellites: int = Field(..., ge=0, description="Satellites blocked by buildings")
+    total_satellites: int = Field(..., ge=0, description="Total visible satellites")
+
+
+class SatelliteDetail(BaseModel):
+    """Per-satellite visibility result for the detail panel and sky plot."""
+
+    id: str = Field(..., description="Satellite identifier")
+    name: str = Field(default="", description="Satellite name")
+    azimuth: float = Field(..., description="Azimuth in degrees (0=N, 90=E)")
+    elevation: float = Field(..., description="Elevation in degrees above horizon")
+    range_km: Optional[float] = Field(default=None, description="Slant range in km")
+    visible: bool = Field(default=True, description="Above minimum elevation mask")
+    obstructed: bool = Field(default=False, description="Blocked by building obstruction")
+    snr: Optional[float] = Field(default=None, description="Estimated signal-to-noise ratio")
+
+
+class ObstructionPoint(BaseModel):
+    """A point on the obstruction profile for sky plot rendering."""
+
+    azimuth: float = Field(..., description="Azimuth in degrees")
+    elevation: float = Field(..., description="Elevation angle of obstruction in degrees")
+
+
+class DataQuality(BaseModel):
+    """Data quality indicators for analysis transparency."""
+
+    buildings: str = Field(description="Building data status: full, partial, none")
+    terrain: str = Field(description="Terrain data status: full, none")
+    satellites: str = Field(description="Satellite data status: live, cached, stale")
+    sources: list[str] = Field(default_factory=list, description="Data sources used")
+    warnings: list[str] = Field(default_factory=list, description="Degradation warnings")
+
+
 class AnalyzeResponse(BaseModel):
     """Response model for single position analysis.
-    
+
     Contains satellite visibility metrics and obstruction analysis.
     """
-    
+
     model_config = ConfigDict(json_schema_extra={
         "example": {
             "zone": "good",
             "n_clear": 42,
             "n_total": 50,
             "obstruction_pct": 16.0,
-            "blocked_azimuths": [[45.0, 60.0], [120.0, 135.0]],
+            "blocked_azimuths": [45.0, 120.0],
             "timestamp": "2024-06-15T12:00:00Z",
             "lat": 40.7128,
             "lon": -74.0060
         }
     })
-    
+
     zone: Zone = Field(
         ..., description="Coverage zone classification"
     )
@@ -159,9 +197,9 @@ class AnalyzeResponse(BaseModel):
     obstruction_pct: float = Field(
         ..., ge=0.0, le=100.0, description="Percentage of sky obstructed"
     )
-    blocked_azimuths: list[list[float]] = Field(
+    blocked_azimuths: list[float] = Field(
         default_factory=list,
-        description="List of [start, end] azimuth ranges that are blocked (degrees)"
+        description="List of blocked azimuth angles in degrees (0-360)"
     )
     timestamp: datetime = Field(
         ..., description="Analysis timestamp (ISO 8601)"
@@ -175,18 +213,18 @@ class AnalyzeResponse(BaseModel):
     elevation: float = Field(
         default=0.0, description="Observer elevation in meters"
     )
-    
-    @field_validator("blocked_azimuths")
-    @classmethod
-    def validate_azimuth_ranges(cls, v: list[list[float]]) -> list[list[float]]:
-        """Validate azimuth ranges are within 0-360 degrees."""
-        for range_pair in v:
-            if len(range_pair) != 2:
-                raise ValueError("Each azimuth range must have exactly 2 values")
-            start, end = range_pair
-            if not (0 <= start <= 360 and 0 <= end <= 360):
-                raise ValueError("Azimuth values must be between 0 and 360 degrees")
-        return v
+    visibility: Optional[VisibilitySummary] = Field(
+        default=None, description="Aggregate visibility counts for detail panel"
+    )
+    satellites: list[SatelliteDetail] = Field(
+        default_factory=list, description="Per-satellite visibility results"
+    )
+    obstructions: list[ObstructionPoint] = Field(
+        default_factory=list, description="Obstruction profile for sky plot"
+    )
+    data_quality: Optional[DataQuality] = Field(
+        default=None, description="Data quality and source transparency"
+    )
 
 
 class HeatmapRequest(BaseModel):
@@ -241,45 +279,125 @@ class HeatmapRequest(BaseModel):
 
 class HeatmapResponse(BaseModel):
     """Response model for heatmap analysis.
-    
-    Returns GeoJSON FeatureCollection with coverage data.
+
+    Returns grid cells and building footprints as GeoJSON FeatureCollections.
     """
-    
-    model_config = ConfigDict(json_schema_extra={
-        "example": {
-            "type": "FeatureCollection",
-            "features": [
-                {
-                    "type": "Feature",
-                    "geometry": {
-                        "type": "Point",
-                        "coordinates": [-74.006, 40.7128]
-                    },
-                    "properties": {
-                        "zone": "good",
-                        "n_clear": 42,
-                        "n_total": 50,
-                        "obstruction_pct": 16.0
-                    }
-                }
-            ],
-            "metadata": {
-                "center_lat": 40.7128,
-                "center_lon": -74.0060,
-                "radius_m": 1000,
-                "spacing_m": 100,
-                "total_points": 317,
-                "timestamp": "2024-06-15T12:00:00Z"
-            }
-        }
-    })
-    
-    type: Literal["FeatureCollection"] = Field(default="FeatureCollection")
-    features: list[GeoJSONFeature] = Field(
-        default_factory=list, description="Grid points with coverage data"
+
+    grid: GeoJSONFeatureCollection = Field(
+        default_factory=GeoJSONFeatureCollection,
+        description="Grid cells with coverage data (Polygon features)"
     )
-    metadata: dict[str, Any] = Field(
-        default_factory=dict, description="Heatmap generation metadata"
+    buildings: GeoJSONFeatureCollection = Field(
+        default_factory=GeoJSONFeatureCollection,
+        description="Building footprints in the analysis area"
+    )
+    center: dict[str, float] = Field(
+        default_factory=dict, description="Center point {lat, lon}"
+    )
+    radius: int = Field(default=500, description="Analysis radius in meters")
+    resolution: int = Field(default=50, description="Grid spacing in meters")
+    timestamp: str = Field(default="", description="Analysis timestamp ISO 8601")
+    data_quality: Optional[DataQuality] = Field(
+        default=None, description="Data quality and source transparency"
+    )
+
+
+class RouteLocation(BaseModel):
+    """A location specified by coordinates or address."""
+
+    lat: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
+    lon: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
+    address: Optional[str] = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def require_coords_or_address(self):
+        """Require either full coordinates or an address string."""
+        has_coords = self.lat is not None and self.lon is not None
+        has_partial_coords = (self.lat is None) != (self.lon is None)
+        has_address = bool(self.address)
+
+        if has_partial_coords:
+            raise ValueError("Both lat and lon are required when using coordinates")
+        if not has_coords and not has_address:
+            raise ValueError("Either lat/lon or address must be provided")
+        return self
+
+
+class RoutePlanRequest(BaseModel):
+    """Request for route-based satellite connectivity planning."""
+
+    origin: RouteLocation
+    destination: RouteLocation
+    sample_interval_m: float = Field(default=500.0, ge=100.0, le=5000.0)
+    time_utc: Optional[str] = None
+
+
+class WaypointAmenities(BaseModel):
+    """Amenities available at a waypoint."""
+
+    parking: bool = False
+    restroom: bool = False
+    fuel: bool = False
+    food: bool = False
+
+
+class Waypoint(BaseModel):
+    """A recommended stop along the route."""
+
+    id: str = Field(description="Waypoint designation e.g. WP-01")
+    lat: float
+    lon: float
+    name: str
+    type: str = Field(description="known_parking or pullover")
+    coverage_pct: float
+    visible_satellites: int
+    total_satellites: int
+    zone: Zone
+    distance_from_origin_m: float
+    eta_seconds: float
+    distance_to_next_m: Optional[float] = None
+    max_obstruction_deg: Optional[float] = None
+    amenities: WaypointAmenities = Field(default_factory=WaypointAmenities)
+    best_window: Optional[str] = None
+
+
+class DeadZone(BaseModel):
+    """A stretch of route with poor satellite connectivity."""
+
+    start_distance_m: float
+    end_distance_m: float
+    length_m: float
+    start_lat: float
+    start_lon: float
+    end_lat: float
+    end_lon: float
+
+
+class MissionSummary(BaseModel):
+    """Summary statistics for a planned mission."""
+
+    origin_name: Optional[str] = None
+    destination_name: Optional[str] = None
+    total_distance_m: float
+    total_duration_s: float
+    num_waypoints: int
+    max_gap_m: float
+    num_dead_zones: int
+    dead_zone_total_m: float
+    route_coverage_pct: float
+
+
+class RoutePlanResponse(BaseModel):
+    """Response for route-based satellite connectivity planning."""
+
+    route_geojson: GeoJSONFeatureCollection
+    waypoints: list[Waypoint]
+    dead_zones: list[DeadZone]
+    mission_summary: MissionSummary
+    data_quality: Optional[DataQuality] = None
+    signal_forecast: list[str] = Field(
+        default_factory=list,
+        description="Segment-by-segment signal quality: clear, marginal, dead"
     )
 
 
