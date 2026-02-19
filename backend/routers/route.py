@@ -22,6 +22,7 @@ from dependencies import (
     get_data_pipeline,
     get_obstruction_engine,
     get_osrm_client,
+    get_request_id,
     get_satellite_engine,
 )
 from models.schemas import (
@@ -59,6 +60,7 @@ def _parse_timestamp(value: str | None) -> datetime:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Invalid time_utc format: {value}",
         ) from e
+        # TODO: Return field-level validation detail for malformed timestamps and timezone offsets.
 
 
 def _classify_zone(clear_ratio: float) -> Zone:
@@ -281,6 +283,27 @@ def _compute_max_gap(waypoints: list[Waypoint], total_distance_m: float) -> floa
     return max(gaps) if gaps else total_distance_m
 
 
+def _remaining_budget_seconds(start_time: float) -> float:
+    """Remaining route budget in seconds."""
+    elapsed = time.time() - start_time
+    return max(0.0, settings.route_timeout_seconds - elapsed)
+
+
+def _classify_error(exc: Exception) -> str:
+    if isinstance(exc, asyncio.TimeoutError):
+        return "timeout"
+    message = str(exc).lower()
+    if "satellite" in message:
+        return "satellite_service"
+    if "terrain" in message or "building" in message:
+        return "data_pipeline"
+    if "obstruction" in message:
+        return "obstruction_engine"
+    if "overpass" in message or "amenit" in message:
+        return "amenities"
+    return "unknown"
+
+
 @router.post("/route/plan", response_model=RoutePlanResponse)
 async def plan_route(
     body: RoutePlanRequest,
@@ -289,15 +312,31 @@ async def plan_route(
     obstruction_engine: Any = Depends(get_obstruction_engine),
     osrm_client: Any = Depends(get_osrm_client),
     amenity_service: Any = Depends(get_amenity_service),
+    request_id: str = Depends(get_request_id),
 ) -> RoutePlanResponse:
     """Plan route connectivity with sampled LOS analysis, amenities, and dead zones."""
     start_time = time.time()
+    if body.sample_interval_m <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="sample_interval_m must be positive",
+        )
 
     origin = _resolve_location(body.origin, amenity_service)
     destination = _resolve_location(body.destination, amenity_service)
     timestamp = _parse_timestamp(body.time_utc)
 
-    route = await asyncio.to_thread(osrm_client.get_route, origin, destination)
+    route_fetch_timeout = max(5.0, min(20.0, _remaining_budget_seconds(start_time)))
+    try:
+        route = await asyncio.wait_for(
+            asyncio.to_thread(osrm_client.get_route, origin, destination),
+            timeout=route_fetch_timeout,
+        )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Route provider timed out",
+        ) from exc
     if route is None:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -321,12 +360,19 @@ async def plan_route(
     analysis_errors = 0
 
     for point in sample_points:
+        if _remaining_budget_seconds(start_time) <= 0:
+            warnings.append("Route analysis budget exhausted; remaining samples skipped")
+            break
+
         try:
-            satellites = await satellite_engine.get_visible_satellites(
+            satellites = await asyncio.wait_for(
+                satellite_engine.get_visible_satellites(
                 lat=point["lat"],
                 lon=point["lon"],
                 elevation=0.0,
                 timestamp=timestamp,
+                ),
+                timeout=min(settings.satellite_timeout_seconds, max(1.0, _remaining_budget_seconds(start_time))),
             )
 
             buildings_result = await data_pipeline.fetch_buildings(
@@ -384,8 +430,9 @@ async def plan_route(
             })
         except Exception as e:
             analysis_errors += 1
+            category = _classify_error(e)
             warnings.append(
-                f"Analysis failed at ({point['lat']:.4f}, {point['lon']:.4f}): {str(e)}"
+                f"[{category}] Analysis failed at ({point['lat']:.4f}, {point['lon']:.4f}): {str(e)}"
             )
             analysis_results.append({
                 **point,
@@ -395,9 +442,18 @@ async def plan_route(
                 "max_obstruction_deg": None,
             })
 
-    amenities = await asyncio.to_thread(
-        amenity_service.query_amenities_along_route, route["geometry"]
-    )
+    try:
+        amenities = await asyncio.wait_for(
+            asyncio.to_thread(
+                amenity_service.query_amenities_along_route,
+                route["geometry"],
+            ),
+            timeout=min(12.0, max(1.0, _remaining_budget_seconds(start_time))),
+        )
+    except Exception as exc:
+        logger.warning("[%s] Amenity lookup degraded: %s", request_id, exc)
+        warnings.append("Amenities unavailable due to upstream timeout")
+        amenities = []
     waypoints = _rank_waypoints(analysis_results, amenities, route)
     dead_zones = _find_dead_zones(analysis_results)
 
@@ -483,7 +539,8 @@ async def plan_route(
 
     elapsed_s = time.time() - start_time
     logger.info(
-        "Route planning completed in %.2fs: samples=%d, waypoints=%d, dead_zones=%d",
+        "[%s] Route planning completed in %.2fs: samples=%d, waypoints=%d, dead_zones=%d",
+        request_id,
         elapsed_s,
         len(analysis_results),
         len(waypoints),

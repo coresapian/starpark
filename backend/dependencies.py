@@ -8,19 +8,25 @@
 
 import asyncio
 import logging
+import random
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, AsyncGenerator, Optional
 
-import redis.asyncio as aioredis
 import asyncpg
 from fastapi import Depends, HTTPException, Request, status
+
+try:
+    import redis.asyncio as aioredis
+except ImportError:  # pragma: no cover - environment-dependent optional dependency
+    aioredis = None
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
 # Singleton instances (initialized on first use)
-_redis_pool: Optional[aioredis.Redis] = None
+_redis_pool: Optional[Any] = None
 _db_pool: Optional[asyncpg.Pool] = None
 _satellite_engine: Optional[Any] = None
 _data_pipeline: Optional[Any] = None
@@ -32,11 +38,55 @@ _amenity_service: Optional[Any] = None
 from config import settings
 
 
+class _NoopRedis:
+    """Minimal async Redis-compatible shim for degraded mode."""
+
+    async def ping(self) -> bool:
+        return False
+
+    async def get(self, _key: str) -> None:
+        return None
+
+    async def setex(self, _key: str, _ttl: int, _value: str) -> bool:
+        return False
+
+    async def close(self) -> None:
+        return None
+
+
+class _NoopSyncRedis:
+    """Minimal sync Redis-compatible shim for degraded mode."""
+
+    def ping(self) -> bool:
+        return False
+
+    def get(self, _key: str) -> None:
+        return None
+
+    def setex(self, _key: str, _ttl: int, _value: bytes | str) -> bool:
+        return False
+
+    def set(self, _key: str, _value: bytes | str, ex: int | None = None) -> bool:
+        return False
+
+    def delete(self, *_keys: str) -> int:
+        return 0
+
+    def exists(self, _key: str) -> int:
+        return 0
+
+    def keys(self, _pattern: str = "*") -> list[str]:
+        return []
+
+    def scan_iter(self, _pattern: str = "*"):
+        return iter(())
+
+
 # ============================================================================
 # Redis Dependency
 # ============================================================================
 
-async def get_redis_pool() -> aioredis.Redis:
+async def get_redis_pool() -> Any:
     """Get or create Redis connection pool.
     
     Returns:
@@ -48,29 +98,30 @@ async def get_redis_pool() -> aioredis.Redis:
     global _redis_pool
     
     if _redis_pool is None:
-        try:
-            _redis_pool = aioredis.from_url(
-                str(settings.redis_url),
-                encoding="utf-8",
-                decode_responses=True,
-                max_connections=settings.redis_pool_size,
-                socket_timeout=settings.redis_socket_timeout,
-                socket_connect_timeout=settings.redis_socket_connect_timeout,
-            )
-            # Test connection
-            await _redis_pool.ping()
-            logger.info("Redis connection pool initialized")
-        except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Cache service unavailable"
-            )
+        if aioredis is None:
+            logger.warning("redis package not installed; using degraded noop cache")
+            _redis_pool = _NoopRedis()
+        else:
+            try:
+                _redis_pool = aioredis.from_url(
+                    str(settings.redis_url),
+                    encoding="utf-8",
+                    decode_responses=True,
+                    max_connections=settings.redis_pool_size,
+                    socket_timeout=settings.redis_socket_timeout,
+                    socket_connect_timeout=settings.redis_socket_connect_timeout,
+                )
+                # Test connection
+                await _redis_pool.ping()
+                logger.info("Redis connection pool initialized")
+            except Exception as e:
+                logger.warning("Redis unavailable; using degraded noop cache: %s", e)
+                _redis_pool = _NoopRedis()
     
     return _redis_pool
 
 
-async def get_redis() -> AsyncGenerator[aioredis.Redis, None]:
+async def get_redis() -> AsyncGenerator[Any, None]:
     """FastAPI dependency for Redis connection.
 
     Yields:
@@ -79,7 +130,7 @@ async def get_redis() -> AsyncGenerator[aioredis.Redis, None]:
     redis = await get_redis_pool()
     try:
         yield redis
-    except aioredis.RedisError as e:
+    except Exception as e:
         logger.error(f"Redis operation failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -103,28 +154,33 @@ async def get_db_pool() -> asyncpg.Pool:
     global _db_pool
     
     if _db_pool is None:
-        try:
-            _db_pool = await asyncpg.create_pool(
-                str(settings.database_url),
-                min_size=5,
-                max_size=settings.database_pool_size,
-                max_inactive_connection_lifetime=300,
-                command_timeout=30,
-                server_settings={
-                    "application_name": "linkspot_api",
-                    "jit": "off",  # Disable JIT for short queries
-                },
-            )
-            # Test connection
-            async with _db_pool.acquire() as conn:
-                await conn.fetchval("SELECT 1")
-            logger.info("Database connection pool initialized")
-        except Exception as e:
-            logger.error(f"Failed to connect to database: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Database service unavailable"
-            )
+        attempts = 3
+        base_backoff = 0.3
+        for attempt in range(1, attempts + 1):
+            try:
+                _db_pool = await asyncpg.create_pool(
+                    str(settings.database_url),
+                    min_size=max(1, min(5, settings.database_pool_size)),
+                    max_size=settings.database_pool_size,
+                    max_inactive_connection_lifetime=300,
+                    command_timeout=settings.request_timeout_seconds,
+                    server_settings={
+                        "application_name": "linkspot_api",
+                        "jit": "off",  # Disable JIT for short queries
+                    },
+                )
+                async with _db_pool.acquire() as conn:
+                    await conn.fetchval("SELECT 1")
+                logger.info("Database connection pool initialized")
+                break
+            except Exception as e:
+                logger.warning("DB pool init attempt %d/%d failed: %s", attempt, attempts, e)
+                if attempt == attempts:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Database service unavailable",
+                    ) from e
+                await asyncio.sleep(base_backoff * (2 ** (attempt - 1)) + random.uniform(0.0, 0.15))
     
     return _db_pool
 
@@ -174,8 +230,12 @@ async def get_satellite_engine() -> Any:
 
     if _satellite_engine is None:
         sync_redis = _get_sync_redis()
-        _satellite_engine = _SatelliteEngineAdapter(sync_redis)
-        logger.info("Satellite engine initialized (real — CelesTrak/Skyfield)")
+        try:
+            _satellite_engine = _SatelliteEngineAdapter(sync_redis)
+            logger.info("Satellite engine initialized (real — CelesTrak/Skyfield)")
+        except Exception as e:
+            logger.warning("Satellite engine unavailable; using degraded fallback: %s", e)
+            _satellite_engine = _FallbackSatelliteEngine(reason=str(e))
 
     return _satellite_engine
 
@@ -187,7 +247,11 @@ def _get_sync_redis():
     calls .decode('utf-8') on cached GeoJSON bytes.  Setting it to True
     causes "'str' object has no attribute 'decode'" errors.
     """
-    import redis as sync_redis
+    try:
+        import redis as sync_redis
+    except ImportError:
+        logger.warning("redis package not installed; using degraded sync noop cache")
+        return _NoopSyncRedis()
     return sync_redis.Redis.from_url(
         str(settings.redis_url),
         decode_responses=False,
@@ -204,6 +268,7 @@ class _SatelliteEngineAdapter:
         self._engine = SatelliteEngine(sync_redis)
         self._engine.fetch_tle_data()
         logger.info(f"Loaded {len(self._engine._satellites)} satellites from TLE data")
+        # TODO: Move TLE refresh to a background updater to prevent stale ephemeris during long-lived sessions.
 
     async def get_visible_satellites(
         self,
@@ -212,6 +277,7 @@ class _SatelliteEngineAdapter:
         elevation: float = 0.0,
         timestamp: Optional[datetime] = None,
     ) -> list[dict]:
+        # TODO: Add input range validation and request cancellation handling for long satellite solves.
         import asyncio
         positions = await asyncio.to_thread(
             self._engine.get_satellite_positions,
@@ -234,6 +300,25 @@ class _SatelliteEngineAdapter:
         return [metadata]
 
 
+class _FallbackSatelliteEngine:
+    """Fallback satellite engine used when optional runtime deps are unavailable."""
+
+    def __init__(self, reason: str):
+        self._reason = reason
+
+    async def get_visible_satellites(
+        self,
+        lat: float,
+        lon: float,
+        elevation: float = 0.0,
+        timestamp: Optional[datetime] = None,
+    ) -> list[dict]:
+        return []
+
+    async def get_constellations(self) -> list[dict]:
+        return [{"name": "unavailable", "status": "degraded", "reason": self._reason}]
+
+
 # ============================================================================
 # Data Pipeline Dependency
 # ============================================================================
@@ -248,8 +333,12 @@ async def get_data_pipeline() -> Any:
     if _data_pipeline is None:
         sync_redis = _get_sync_redis()
         postgis_url = str(settings.database_url).replace("+asyncpg", "")
-        _data_pipeline = _DataPipelineAdapter(sync_redis, postgis_url)
-        logger.info("Data pipeline initialized (real — Overture/OSM)")
+        try:
+            _data_pipeline = _DataPipelineAdapter(sync_redis, postgis_url)
+            logger.info("Data pipeline initialized (real — Overture/OSM)")
+        except Exception as e:
+            logger.warning("Data pipeline unavailable; using degraded fallback: %s", e)
+            _data_pipeline = _FallbackDataPipeline(reason=str(e))
 
     return _data_pipeline
 
@@ -328,6 +417,29 @@ class _DataPipelineAdapter:
             return []
 
 
+class _FallbackDataPipeline:
+    """Fallback data pipeline used when optional runtime deps are unavailable."""
+
+    def __init__(self, reason: str):
+        self._reason = reason
+
+    async def fetch_buildings(
+        self,
+        lat: float,
+        lon: float,
+        radius_m: float,
+    ) -> tuple[list[dict], str]:
+        return [], f"degraded:{self._reason}"
+
+    async def fetch_terrain(
+        self,
+        lat: float,
+        lon: float,
+        radius_m: float,
+    ) -> list[dict]:
+        return []
+
+
 # ============================================================================
 # Obstruction Engine Dependency
 # ============================================================================
@@ -372,6 +484,7 @@ class _ObstructionEngineAdapter:
         """Perform ray-casting obstruction analysis at a single position."""
         import numpy as np
         from enu_utils import wgs84_to_enu, azimuth_to_sector_index
+        # TODO: Pre-compute terrain influence once per point and avoid repeated projection allocations.
 
         # Filter satellites above minimum elevation
         visible_sats = [
@@ -489,6 +602,7 @@ class _AmenityService:
     def geocode_address(self, address: str) -> tuple[float, float]:
         """Geocode an address using Nominatim."""
         import requests
+        # TODO: Centralize outbound geocoder settings (UA, timeout, fallback provider) and add response validation.
 
         resp = requests.get(
             "https://nominatim.openstreetmap.org/search",
@@ -501,6 +615,10 @@ class _AmenityService:
         if not results:
             raise ValueError(f"Could not geocode address: {address}")
         return float(results[0]["lat"]), float(results[0]["lon"])
+
+    def __init__(self):
+        self._overpass_failures = 0
+        self._overpass_blocked_until = 0.0
 
     def query_amenities_along_route(
         self, geometry: list[tuple[float, float]], buffer_m: float = 500.0
@@ -538,15 +656,24 @@ class _AmenityService:
         """
 
         try:
+            now = time.time()
+            if self._overpass_blocked_until > now:
+                logger.warning("Overpass circuit open, skipping amenity lookup")
+                return []
             resp = requests.post(
                 "https://overpass-api.de/api/interpreter",
                 data={"data": query},
-                timeout=30,
+                timeout=15,
             )
             resp.raise_for_status()
             payload = resp.json()
+            self._overpass_failures = 0
+            self._overpass_blocked_until = 0.0
         except Exception as e:
             logger.warning("Amenity query failed: %s", str(e))
+            self._overpass_failures += 1
+            if self._overpass_failures >= 3:
+                self._overpass_blocked_until = time.time() + 120.0
             return []
 
         amenities = []
@@ -649,7 +776,7 @@ async def verify_api_key(request: Request) -> Optional[str]:
 # ============================================================================
 
 async def get_analysis_dependencies(
-    redis: aioredis.Redis = Depends(get_redis),
+    redis: Any = Depends(get_redis),
     db: asyncpg.Connection = Depends(get_db),
     satellite_engine: Any = Depends(get_satellite_engine),
     data_pipeline: Any = Depends(get_data_pipeline),

@@ -58,6 +58,28 @@ logger = logging.getLogger(__name__)
 # Building Queries
 # =============================================================================
 
+
+def _validate_lat_lon(lat: float, lon: float) -> None:
+    if not (-90.0 <= float(lat) <= 90.0):
+        raise ValueError(f"Invalid latitude: {lat}")
+    if not (-180.0 <= float(lon) <= 180.0):
+        raise ValueError(f"Invalid longitude: {lon}")
+
+
+def _validate_radius(radius_m: float) -> None:
+    if not (0.0 < float(radius_m) <= 100000.0):
+        raise ValueError(f"Invalid radius: {radius_m}")
+
+
+def _validate_bbox(min_lat: float, min_lon: float, max_lat: float, max_lon: float) -> tuple[float, float, float, float]:
+    _validate_lat_lon(min_lat, min_lon)
+    _validate_lat_lon(max_lat, max_lon)
+    if min_lat > max_lat:
+        min_lat, max_lat = max_lat, min_lat
+    if min_lon > max_lon:
+        min_lon, max_lon = max_lon, min_lon
+    return min_lat, min_lon, max_lat, max_lon
+
 def get_buildings_in_radius(
     session: Session,
     lat: float,
@@ -88,10 +110,14 @@ def get_buildings_in_radius(
         ...     session, 37.7749, -122.4194, 500.0
         ... )
     """
+    _validate_lat_lon(lat, lon)
+    _validate_radius(radius_m)
     # Create center point
+    # TODO: Add async context timeout so one slow route-analysis request can't consume DB workers indefinitely.
     center_point = f"SRID=4326;POINT({lon} {lat})"
     
     # Build query with ST_DWithin for indexed search
+    # TODO: Add explicit ST_DWithin input sanitization if radius_m gets set from untrusted sources.
     query = (
         select(
             Building.id,
@@ -122,6 +148,7 @@ def get_buildings_in_radius(
     if min_height is not None:
         query = query.where(Building.height >= min_height)
     
+    # TODO: Add execution-time budget for this query when max range is unexpectedly large.
     results = session.execute(query).fetchall()
     
     buildings = []
@@ -165,6 +192,8 @@ async def get_buildings_in_radius_async(
     Returns:
         List of building dictionaries with geometry as GeoJSON
     """
+    _validate_lat_lon(lat, lon)
+    _validate_radius(radius_m)
     center_point = f"SRID=4326;POINT({lon} {lat})"
     
     query = (
@@ -245,6 +274,7 @@ def get_buildings_in_bbox(
     Returns:
         List of building dictionaries with geometry as GeoJSON
     """
+    min_lat, min_lon, max_lat, max_lon = _validate_bbox(min_lat, min_lon, max_lat, max_lon)
     # Create bounding box polygon
     bbox_wkt = f"SRID=4326;POLYGON(({min_lon} {min_lat}, {max_lon} {min_lat}, {max_lon} {max_lat}, {min_lon} {max_lat}, {min_lon} {min_lat}))"
     
@@ -299,6 +329,7 @@ async def get_buildings_in_bbox_async(
     limit: int = 10000,
 ) -> List[Dict[str, Any]]:
     """Async version of get_buildings_in_bbox."""
+    min_lat, min_lon, max_lat, max_lon = _validate_bbox(min_lat, min_lon, max_lat, max_lon)
     bbox_wkt = f"SRID=4326;POLYGON(({min_lon} {min_lat}, {max_lon} {min_lat}, {max_lon} {max_lat}, {min_lon} {max_lat}, {min_lon} {min_lat}))"
     
     query = (
@@ -372,6 +403,8 @@ def insert_buildings_batch(
     for col in required_cols:
         if col not in buildings_gdf.columns:
             raise ValueError(f"Required column '{col}' not found in GeoDataFrame")
+    # TODO: Add async-compatible validation before float casting to avoid transaction rollback storms.
+    # TODO: Add per-column validation/coercion for nullable/non-numeric heights before casting to float.
     
     # Ensure CRS is WGS84
     if buildings_gdf.crs is not None and buildings_gdf.crs.to_epsg() != 4326:
@@ -386,6 +419,7 @@ def insert_buildings_batch(
         buildings_data = []
         for idx, row in batch.iterrows():
             # Convert geometry to WKT
+            # TODO: Skip invalid/empty geometries explicitly so corrupted batches don't abort the full load.
             geom_wkt = row.geometry.wkt if hasattr(row.geometry, 'wkt') else str(row.geometry)
             
             building_data = {
@@ -446,6 +480,7 @@ async def insert_buildings_batch_async(
         
         buildings_data = []
         for idx, row in batch.iterrows():
+            # TODO: Guard against zero-area/invalid geometries to keep ON CONFLICT update semantics predictable.
             geom_wkt = row.geometry.wkt if hasattr(row.geometry, 'wkt') else str(row.geometry)
             
             building_data = {
@@ -574,10 +609,15 @@ def get_cached_analysis(
     Returns:
         Cached analysis result or None if not found/expired
     """
+    try:
+        pgh.decode_exactly(geohash)
+    except Exception:
+        return None
     query = select(AnalysisCache).where(AnalysisCache.geohash == geohash)
     
     if max_age_hours:
         cutoff_time = datetime.utcnow() - timedelta(hours=max_age_hours)
+        # TODO: Use cutoff_time in query to ensure explicit expiry floor is enforced consistently.
         query = query.where(
             (AnalysisCache.expires_at.is_(None)) | 
             (AnalysisCache.expires_at > datetime.utcnow())
@@ -601,7 +641,8 @@ def get_cached_analysis(
             "access_count": result.access_count,
         }
     
-    return None
+        # TODO: Add cache metrics for stale-hit vs miss behavior in endpoint-level SLOs.
+        return None
 
 
 async def get_cached_analysis_async(
@@ -688,6 +729,7 @@ def cache_analysis_result(
         }
     )
     
+    # TODO: Capture upsert rowcount and raise a typed error when cache write is a no-op.
     result_exec = session.execute(stmt)
     
     # Get the ID of the inserted/updated record
@@ -736,6 +778,7 @@ async def cache_analysis_result_async(
     
     await session.execute(stmt)
     
+    # TODO: Avoid extra SELECT by using `RETURNING id` on upsert and reusing row data.
     result_exec = await session.execute(
         select(AnalysisCache).where(AnalysisCache.geohash == geohash)
     )
@@ -892,6 +935,8 @@ def compute_geohash(lat: float, lon: float, precision: int = 6) -> str:
     Returns:
         Geohash string
     """
+    _validate_lat_lon(lat, lon)
+    precision = max(1, min(int(precision), 12))
     return pgh.encode(lat, lon, precision=precision)
 
 
@@ -925,6 +970,7 @@ def invalidate_expired_cache(session: Session) -> int:
     result = session.execute(stmt)
     deleted_count = result.rowcount
     
+    # TODO: Guard delete scope with lock timeout to avoid blocking active read/write workloads.
     logger.info(f"Invalidated {deleted_count} expired cache entries")
     return deleted_count
 

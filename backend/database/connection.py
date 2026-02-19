@@ -30,6 +30,8 @@ with connection pooling, session handling, and spatial index creation.
 """
 
 import logging
+import random
+import time
 from contextlib import asynccontextmanager, contextmanager
 from typing import AsyncGenerator, Generator, Optional, Any
 
@@ -132,6 +134,7 @@ class Database:
             return sync_uri.replace("postgresql://", "postgresql+asyncpg://", 1)
         elif sync_uri.startswith("postgresql+psycopg2://"):
             return sync_uri.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
+        # TODO: Validate/normalize other sync drivers so connection strings are deterministic.
         return sync_uri
     
     def connect(self) -> None:
@@ -141,38 +144,59 @@ class Database:
         Creates both synchronous and asynchronous engines with
         configured connection pooling.
         """
-        # Create synchronous engine
-        self.engine = create_engine(
-            self.connection_string,
-            echo=self._echo,
-            **self._pool_config,
-        )
-        
-        # Create asynchronous engine
-        self.async_engine = create_async_engine(
-            self.async_connection_string,
-            echo=self._echo,
-            **self._pool_config,
-        )
-        
-        # Create session factories
-        self.SessionLocal = sessionmaker(
-            autocommit=False,
-            autoflush=False,
-            bind=self.engine,
-        )
-        
-        self.AsyncSessionLocal = async_sessionmaker(
-            autocommit=False,
-            autoflush=False,
-            bind=self.async_engine,
-            class_=AsyncSession,
-        )
-        
-        # Register event listeners for connection setup
-        event.listen(self.engine, "connect", self._on_connect)
-        
-        logger.info("Database engines and session factories created")
+        max_attempts = 3
+        base_backoff = 0.25
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                if self.engine is not None:
+                    self.engine.dispose()
+                self.engine = create_engine(
+                    self.connection_string,
+                    echo=self._echo,
+                    **self._pool_config,
+                )
+
+                if self.async_engine is not None:
+                    # Sync path cannot await async dispose; drop reference and replace.
+                    self.async_engine = None
+                self.async_engine = create_async_engine(
+                    self.async_connection_string,
+                    echo=self._echo,
+                    **self._pool_config,
+                )
+
+                self.SessionLocal = sessionmaker(
+                    autocommit=False,
+                    autoflush=False,
+                    bind=self.engine,
+                )
+                self.AsyncSessionLocal = async_sessionmaker(
+                    autocommit=False,
+                    autoflush=False,
+                    bind=self.async_engine,
+                    class_=AsyncSession,
+                )
+
+                if self.engine is not None:
+                    event.listen(self.engine, "connect", self._on_connect)
+
+                logger.info("Database engines and session factories created")
+                return
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Database connect attempt %d/%d failed: %s",
+                    attempt,
+                    max_attempts,
+                    exc,
+                )
+                if attempt < max_attempts:
+                    sleep_s = base_backoff * (2 ** (attempt - 1)) + random.uniform(0.0, 0.2)
+                    time.sleep(sleep_s)
+
+        raise RuntimeError(f"Failed to initialize database engines after retries: {last_error}")
     
     @staticmethod
     def _on_connect(dbapi_conn: Any, connection_record: Any) -> None:
@@ -181,6 +205,7 @@ class Database:
         cursor = dbapi_conn.cursor()
         cursor.execute("SET timezone TO 'UTC';")
         cursor.close()
+        # TODO: Set role/search path and lock timeout defaults per request profile if needed.
     
     @contextmanager
     def get_session(self) -> Generator[Session, None, None]:
@@ -208,6 +233,7 @@ class Database:
             raise
         finally:
             session.close()
+            # TODO: Track rollback/close metrics for connection pool pressure diagnostics.
     
     @asynccontextmanager
     async def get_async_session(self) -> AsyncGenerator[AsyncSession, None]:
@@ -304,6 +330,7 @@ class Database:
         ]
         
         with self.engine.connect() as conn:
+            # TODO: Run DDL in an explicit transaction and report partial-failure details.
             for statement in index_statements:
                 conn.execute(text(statement))
             conn.commit()
@@ -346,6 +373,7 @@ class Database:
         ]
         
         async with self.async_engine.connect() as conn:
+            # TODO: Consider `CREATE CONCURRENTLY` or lock-timeout settings for zero-downtime environments.
             for statement in index_statements:
                 await conn.execute(text(statement))
             await conn.commit()
@@ -423,11 +451,12 @@ class Database:
         self.AsyncSessionLocal = None
         
         logger.info("Database connections closed")
+        # TODO: Add logging around connection close duration to catch slow shutdowns under load.
     
     async def close_async(self) -> None:
         """Close database connections asynchronously."""
         logger.info("Closing database connections (async)...")
-        
+
         if self.async_engine:
             await self.async_engine.dispose()
             self.async_engine = None
@@ -457,6 +486,7 @@ class Database:
                 return result.scalar() == 1
         except Exception as e:
             logger.error(f"Database health check failed: {e}")
+            # TODO: Return a richer diagnostic object instead of bool for caller retries/fallbacks.
             return False
     
     async def health_check_async(self) -> bool:
@@ -470,6 +500,7 @@ class Database:
                 return result.scalar() == 1
         except Exception as e:
             logger.error(f"Database health check failed (async): {e}")
+            # TODO: Capture and surface async driver errors separately from SQL execution failures.
             return False
 
 

@@ -5,6 +5,7 @@
 
 """Satellite API endpoints for LinkSpot."""
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -12,7 +13,6 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from config import settings
@@ -93,7 +93,7 @@ async def get_visible_satellites(
         description="Query timestamp (ISO 8601). Defaults to current time.",
         example="2024-06-15T12:00:00Z",
     ),
-    redis: aioredis.Redis = Depends(get_redis),
+    redis: Any = Depends(get_redis),
     satellite_engine: Any = Depends(get_satellite_engine),
     request_id: str = Depends(get_request_id),
 ) -> VisibleSatellitesResponse:
@@ -132,48 +132,65 @@ async def get_visible_satellites(
             "timestamp": query_time.isoformat(),
         }
         cache_key = f"satellites:{hashlib.sha256(json.dumps(cache_params, sort_keys=True).encode()).hexdigest()[:16]}"
-        
-        cached_result = await redis.get(cache_key)
+
+        cached_result = None
+        try:
+            cached_result = await redis.get(cache_key)
+        except Exception as cache_error:
+            logger.warning("[%s] Satellite cache read unavailable: %s", request_id, cache_error)
+
         if cached_result:
             logger.info(f"[{request_id}] Cache hit for satellites")
             result = json.loads(cached_result)
             return VisibleSatellitesResponse(**result)
-        
-        # Get visible satellites from engine
-        satellite_data = await satellite_engine.get_visible_satellites(
-            lat=lat,
-            lon=lon,
-            elevation=elevation,
-            timestamp=query_time,
+
+        # Get visible satellites from engine with timeout budget.
+        satellite_data = await asyncio.wait_for(
+            satellite_engine.get_visible_satellites(
+                lat=lat,
+                lon=lon,
+                elevation=elevation,
+                timestamp=query_time,
+            ),
+            timeout=settings.satellite_timeout_seconds,
         )
-        
-        # Convert to response model
+
+        # Convert to response model, skipping malformed records.
         satellites = []
+        malformed_records = 0
         for sat in satellite_data:
-            # Apply elevation mask
-            if sat.get("elevation", 0) < settings.elevation_mask_degrees:
-                continue
-            
-            # Limit results
-            if len(satellites) >= settings.max_satellites_per_query:
-                logger.warning(f"[{request_id}] Truncated results to {settings.max_satellites_per_query}")
-                break
-            
-            satellites.append(
-                SatellitePosition(
-                    satellite_id=sat.get("satellite_id", "UNKNOWN"),
-                    norad_id=sat.get("norad_id"),
-                    azimuth=round(sat.get("azimuth", 0), 2),
-                    elevation=round(sat.get("elevation", 0), 2),
-                    range_km=sat.get("range_km"),
-                    velocity_kms=sat.get("velocity_kms"),
-                    constellation=sat.get("constellation"),
+            try:
+                sat_elevation = float(sat.get("elevation", 0.0))
+                sat_azimuth = float(sat.get("azimuth", 0.0))
+                if sat_elevation < settings.elevation_mask_degrees:
+                    continue
+
+                satellites.append(
+                    SatellitePosition(
+                        satellite_id=str(sat.get("satellite_id", "UNKNOWN")),
+                        norad_id=sat.get("norad_id"),
+                        azimuth=round(sat_azimuth % 360.0, 2),
+                        elevation=round(sat_elevation, 2),
+                        range_km=sat.get("range_km"),
+                        velocity_kms=sat.get("velocity_kms"),
+                        constellation=sat.get("constellation"),
+                    )
                 )
+            except Exception:
+                malformed_records += 1
+
+        # Sort by elevation (highest first) and apply deterministic truncation.
+        satellites.sort(key=lambda s: (s.elevation, s.satellite_id), reverse=True)
+        if len(satellites) > settings.max_satellites_per_query:
+            satellites = satellites[:settings.max_satellites_per_query]
+            logger.warning(
+                "[%s] Truncated results to %d records",
+                request_id,
+                settings.max_satellites_per_query,
             )
-        
-        # Sort by elevation (highest first)
-        satellites.sort(key=lambda s: s.elevation, reverse=True)
-        
+        if malformed_records:
+            logger.warning("[%s] Skipped %d malformed satellite records", request_id, malformed_records)
+
         response = VisibleSatellitesResponse(
             satellites=satellites,
             count=len(satellites),
@@ -181,24 +198,33 @@ async def get_visible_satellites(
             location={"lat": lat, "lon": lon},
             elevation_mask=settings.elevation_mask_degrees,
         )
-        
-        # Cache result (shorter TTL for satellite data)
-        await redis.setex(
-            cache_key,
-            60,  # 1 minute TTL for satellite positions
-            json.dumps(response.model_dump(mode="json")),
-        )
-        
+
+        # Cache result (shorter TTL for satellite data); never fail request on cache write.
+        try:
+            await redis.setex(
+                cache_key,
+                60,  # 1 minute TTL for satellite positions
+                json.dumps(response.model_dump(mode="json")),
+            )
+        except Exception as cache_error:
+            logger.warning("[%s] Satellite cache write unavailable: %s", request_id, cache_error)
+
         elapsed_ms = (time.time() - start_time) * 1000
         logger.info(
             f"[{request_id}] Found {len(satellites)} visible satellites "
             f"in {elapsed_ms:.1f}ms"
         )
-        
+
         return response
         
     except HTTPException:
         raise
+    except asyncio.TimeoutError as e:
+        logger.warning("[%s] Satellite query timed out: %s", request_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Satellite query timed out",
+        ) from e
     except Exception as e:
         logger.error(f"[{request_id}] Failed to get satellites: {e}", exc_info=True)
         raise HTTPException(
@@ -233,7 +259,7 @@ async def get_visible_satellites(
 )
 async def get_constellations(
     request: Request,
-    redis: aioredis.Redis = Depends(get_redis),
+    redis: Any = Depends(get_redis),
     satellite_engine: Any = Depends(get_satellite_engine),
     request_id: str = Depends(get_request_id),
 ) -> ConstellationListResponse:
@@ -258,7 +284,11 @@ async def get_constellations(
     try:
         # Check cache
         cache_key = "constellations:all"
-        cached_result = await redis.get(cache_key)
+        cached_result = None
+        try:
+            cached_result = await redis.get(cache_key)
+        except Exception as cache_error:
+            logger.warning("[%s] Constellation cache read unavailable: %s", request_id, cache_error)
         
         if cached_result:
             logger.info(f"[{request_id}] Cache hit for constellations")
@@ -266,11 +296,16 @@ async def get_constellations(
             return ConstellationListResponse(**result)
         
         # Get constellation data from engine
-        constellation_data = await satellite_engine.get_constellations()
+        constellation_data = await asyncio.wait_for(
+            satellite_engine.get_constellations(),
+            timeout=settings.satellite_timeout_seconds,
+        )
         
         # Convert to response model
         constellations = []
-        for const in constellation_data:
+        for const in constellation_data if isinstance(constellation_data, list) else []:
+            if not isinstance(const, dict):
+                continue
             constellations.append(
                 ConstellationInfo(
                     name=const.get("name", "Unknown"),
@@ -289,11 +324,14 @@ async def get_constellations(
         )
         
         # Cache result (longer TTL for constellation info)
-        await redis.setex(
-            cache_key,
-            3600,  # 1 hour TTL
-            json.dumps(response.model_dump(mode="json")),
-        )
+        try:
+            await redis.setex(
+                cache_key,
+                3600,  # 1 hour TTL
+                json.dumps(response.model_dump(mode="json")),
+            )
+        except Exception as cache_error:
+            logger.warning("[%s] Constellation cache write unavailable: %s", request_id, cache_error)
         
         elapsed_ms = (time.time() - start_time) * 1000
         logger.info(
@@ -305,6 +343,11 @@ async def get_constellations(
         
     except HTTPException:
         raise
+    except asyncio.TimeoutError as e:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Constellation query timed out",
+        ) from e
     except Exception as e:
         logger.error(f"[{request_id}] Failed to get constellations: {e}", exc_info=True)
         raise HTTPException(
@@ -336,7 +379,7 @@ async def get_constellations(
 async def get_constellation(
     request: Request,
     name: str,
-    redis: aioredis.Redis = Depends(get_redis),
+    redis: Any = Depends(get_redis),
     satellite_engine: Any = Depends(get_satellite_engine),
     request_id: str = Depends(get_request_id),
 ) -> ConstellationInfo:
@@ -360,20 +403,26 @@ async def get_constellation(
     try:
         # Check cache
         cache_key = f"constellation:{name.lower()}"
-        cached_result = await redis.get(cache_key)
+        cached_result = None
+        try:
+            cached_result = await redis.get(cache_key)
+        except Exception as cache_error:
+            logger.warning("[%s] Constellation cache read unavailable: %s", request_id, cache_error)
         
         if cached_result:
             logger.info(f"[{request_id}] Cache hit for constellation {name}")
             return ConstellationInfo(**json.loads(cached_result))
         
-        # Get all constellations and find the one we want
-        all_constellations = await satellite_engine.get_constellations()
-        
-        constellation = None
-        for const in all_constellations:
-            if const.get("name", "").lower() == name.lower():
-                constellation = const
-                break
+        all_constellations = await asyncio.wait_for(
+            satellite_engine.get_constellations(),
+            timeout=settings.satellite_timeout_seconds,
+        )
+        by_name = {
+            str(const.get("name", "")).lower(): const
+            for const in all_constellations
+            if isinstance(const, dict)
+        }
+        constellation = by_name.get(name.lower())
         
         if not constellation:
             raise HTTPException(
@@ -392,11 +441,14 @@ async def get_constellation(
         )
         
         # Cache result
-        await redis.setex(
-            cache_key,
-            3600,  # 1 hour TTL
-            json.dumps(response.model_dump(mode="json")),
-        )
+        try:
+            await redis.setex(
+                cache_key,
+                3600,  # 1 hour TTL
+                json.dumps(response.model_dump(mode="json")),
+            )
+        except Exception as cache_error:
+            logger.warning("[%s] Constellation cache write unavailable: %s", request_id, cache_error)
         
         logger.info(f"[{request_id}] Retrieved constellation: {name}")
         
@@ -404,6 +456,11 @@ async def get_constellation(
         
     except HTTPException:
         raise
+    except asyncio.TimeoutError as e:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"Timed out while retrieving constellation '{name}'",
+        ) from e
     except Exception as e:
         logger.error(f"[{request_id}] Failed to get constellation: {e}", exc_info=True)
         raise HTTPException(

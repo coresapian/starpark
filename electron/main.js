@@ -22,6 +22,16 @@ registerScheme();
 
 let mainWindow = null;
 let settingsWindow = null;
+let backendPollIntervalId = null;
+
+function isTrustedRenderer(webContents) {
+  try {
+    const currentURL = new URL(webContents.getURL());
+    return currentURL.protocol === 'app:' && currentURL.host === 'linkspot';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Create the main application window.
@@ -55,34 +65,12 @@ function createMainWindow() {
   mainWindowState.manage(mainWindow);
 
   // Load the app via custom protocol
-  mainWindow.loadURL('app://linkspot/index.html');
+  mainWindow.loadURL('app://linkspot/index.html').catch((err) => {
+    log.error('Failed to load app:// URL:', err);
+  });
 
-  // Wire menu commands to the app after page loads
-  mainWindow.webContents.on('did-finish-load', () => {
-    mainWindow.webContents.executeJavaScript(`
-      if (window.electronAPI) {
-        window.electronAPI.onFocusSearch(() => {
-          const input = document.getElementById('search-input');
-          if (input) input.focus();
-        });
-
-        window.electronAPI.onRefreshMap(() => {
-          if (window.linkSpotApp && window.linkSpotApp.state.currentPosition) {
-            const pos = window.linkSpotApp.state.currentPosition;
-            window.linkSpotApp.state.lastHeatMapRequest = null;
-            window.linkSpotApp.state.lastScannedCenter = null;
-            window.linkSpotApp.loadHeatMap(pos.lat, pos.lon);
-          }
-        });
-
-        window.electronAPI.onGoToLocation(() => {
-          if (window.linkSpotApp) {
-            window.linkSpotApp.centerOnGPS();
-          }
-        });
-      }
-      void 0;
-    `).catch(err => log.warn('Post-load injection failed:', err));
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
+    log.error('Renderer load failed:', errorCode, errorDescription);
   });
 
   mainWindow.on('closed', () => {
@@ -143,19 +131,11 @@ ipcMain.handle('get-settings', () => {
 });
 
 ipcMain.handle('set-settings', (_event, settings) => {
-  if (settings.backendURL !== undefined) {
-    try {
-      const parsed = new URL(settings.backendURL);
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        return { success: false, error: 'Backend URL must use HTTP or HTTPS' };
-      }
-      store.set('backendURL', settings.backendURL);
-    } catch {
-      return { success: false, error: 'Invalid URL format' };
-    }
-  }
-  if (settings.notifications !== undefined) {
-    store.set('notifications', settings.notifications);
+  try {
+    const normalized = store.normalizeSettingsPatch(settings);
+    Object.entries(normalized).forEach(([key, value]) => store.set(key, value));
+  } catch (error) {
+    return { success: false, error: error.message || 'Invalid settings payload' };
   }
 
   // Notify the main window
@@ -171,11 +151,8 @@ ipcMain.handle('set-settings', (_event, settings) => {
 
 ipcMain.handle('test-backend', async (_event, url) => {
   try {
-    const parsed = new URL(url);
-    if (!['http:', 'https:'].includes(parsed.protocol)) {
-      return { success: false, error: 'Only HTTP/HTTPS URLs are allowed' };
-    }
-    const response = await net.fetch(`${url}/api/v1/health`, {
+    const normalized = store.normalizeBackendURL(url);
+    const response = await net.fetch(`${normalized}/api/v1/health`, {
       method: 'GET'
     });
     const data = await response.json();
@@ -252,10 +229,10 @@ app.whenReady().then(() => {
   // Grant permissions for geolocation, notifications, etc.
   const allowedPermissions = ['geolocation', 'notifications', 'media'];
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    callback(allowedPermissions.includes(permission));
+    callback(isTrustedRenderer(webContents) && allowedPermissions.includes(permission));
   });
-  session.defaultSession.setPermissionCheckHandler((_webContents, permission) => {
-    return allowedPermissions.includes(permission);
+  session.defaultSession.setPermissionCheckHandler((webContents, permission) => {
+    return isTrustedRenderer(webContents) && allowedPermissions.includes(permission);
   });
 
   // Create main window
@@ -280,7 +257,9 @@ app.whenReady().then(() => {
   });
 
   // Setup auto-updater
-  setupUpdater();
+  setupUpdater({
+    enabled: app.isPackaged && store.get('autoUpdateEnabled') !== false
+  });
 
   // Periodic backend health check — broadcast status to renderer
   let lastBackendStatus = null;
@@ -288,11 +267,15 @@ app.whenReady().then(() => {
     const backendURL = store.get('backendURL');
     let status;
     try {
-      const response = await net.fetch(`${backendURL}/api/v1/health`, { method: 'GET' });
-      await response.json();
-      status = { connected: true };
+      const response = await net.fetch(`${backendURL}/api/v1/health/detailed`, { method: 'GET' });
+      const payload = await response.json().catch(() => ({}));
+      status = {
+        connected: response.ok,
+        overall: payload.status || 'unknown',
+        components: Array.isArray(payload.components) ? payload.components : []
+      };
     } catch {
-      status = { connected: false };
+      status = { connected: false, overall: 'unreachable', components: [] };
     }
     if (JSON.stringify(status) !== JSON.stringify(lastBackendStatus)) {
       lastBackendStatus = status;
@@ -302,7 +285,8 @@ app.whenReady().then(() => {
     }
   }
   checkBackend();
-  setInterval(checkBackend, 30000);
+  const backendIntervalMs = 30000;
+  backendPollIntervalId = setInterval(checkBackend, backendIntervalMs);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -322,6 +306,9 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   destroyTray();
+  if (typeof backendPollIntervalId !== 'undefined') {
+    clearInterval(backendPollIntervalId);
+  }
 });
 
 // Expose createSettingsWindow for menu module

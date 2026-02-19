@@ -5,6 +5,7 @@
 
 """Analysis API endpoints for LinkSpot."""
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -13,15 +14,12 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-import redis.asyncio as aioredis
-import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from config import settings
 from dependencies import (
     get_data_pipeline,
-    get_db,
     get_obstruction_engine,
     get_redis,
     get_request_id,
@@ -124,9 +122,10 @@ def _generate_grid_points(
     # 1 degree latitude ≈ 111 km
     lat_spacing = spacing_m / 111000.0
     
-    # Calculate number of steps
+    # Calculate number of steps with hard upper bound.
     n_steps = int(radius_m / spacing_m)
-    
+    n_steps = min(n_steps, 150)
+
     for i in range(-n_steps, n_steps + 1):
         for j in range(-n_steps, n_steps + 1):
             lat = center_lat + (i * lat_spacing)
@@ -144,6 +143,45 @@ def _generate_grid_points(
                 points.append((lat, lon))
     
     return points
+
+
+def _normalize_bool(record: dict[str, Any], primary: str, fallback: str, default: bool) -> bool:
+    """Normalize bool flags across legacy payload variants."""
+    value = record.get(primary)
+    if value is None:
+        value = record.get(fallback, default)
+    return bool(value)
+
+
+def _normalize_obstruction_result(raw: Any) -> dict[str, Any]:
+    """Validate and normalize obstruction-engine payload."""
+    if not isinstance(raw, dict):
+        return {
+            "n_clear": 0,
+            "n_total": 0,
+            "obstruction_pct": 100.0,
+            "blocked_azimuths": [],
+            "satellite_details": [],
+            "obstruction_profile": [],
+        }
+
+    n_clear = int(raw.get("n_clear", 0) or 0)
+    n_total = int(raw.get("n_total", 0) or 0)
+    if n_total < 0:
+        n_total = 0
+    if n_clear < 0:
+        n_clear = 0
+    if n_clear > n_total and n_total > 0:
+        n_clear = n_total
+
+    return {
+        "n_clear": n_clear,
+        "n_total": n_total,
+        "obstruction_pct": min(100.0, max(0.0, float(raw.get("obstruction_pct", 0.0) or 0.0))),
+        "blocked_azimuths": list(raw.get("blocked_azimuths", []) or []),
+        "satellite_details": list(raw.get("satellite_details", []) or []),
+        "obstruction_profile": list(raw.get("obstruction_profile", []) or []),
+    }
 
 
 # ============================================================================
@@ -176,8 +214,7 @@ def _generate_grid_points(
 async def analyze_position(
     request: Request,
     body: AnalyzeRequest,
-    redis: aioredis.Redis = Depends(get_redis),
-    db: asyncpg.Connection = Depends(get_db),
+    redis: Any = Depends(get_redis),
     satellite_engine: Any = Depends(get_satellite_engine),
     data_pipeline: Any = Depends(get_data_pipeline),
     obstruction_engine: Any = Depends(get_obstruction_engine),
@@ -189,7 +226,6 @@ async def analyze_position(
         request: FastAPI request object.
         body: Analysis request parameters.
         redis: Redis connection.
-        db: Database connection.
         satellite_engine: Satellite engine instance.
         data_pipeline: Data pipeline instance.
         obstruction_engine: Obstruction engine instance.
@@ -202,7 +238,13 @@ async def analyze_position(
         HTTPException: If analysis fails.
     """
     start_time = time.time()
+    deadline = start_time + settings.analyze_timeout_seconds
     timestamp = body.timestamp or datetime.now(timezone.utc)
+    if not (math.isfinite(body.lat) and math.isfinite(body.lon)):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Latitude/longitude must be finite numbers",
+        )
 
     logger.info(
         f"[{request_id}] Starting analysis for lat={body.lat}, lon={body.lon}"
@@ -216,6 +258,7 @@ async def analyze_position(
             "lon": round(body.lon, 6),
             "elevation": body.elevation,
             "timestamp": cache_ts.isoformat(),
+            "timeout_s": settings.analyze_timeout_seconds,
         }
         cache_key = _generate_cache_key("analyze", cache_params)
         
@@ -224,13 +267,17 @@ async def analyze_position(
             logger.info(f"[{request_id}] Cache hit for analysis")
             result = json.loads(cached_result)
             return AnalyzeResponse(**result)
+        logger.debug("[%s] Analyze cache miss", request_id)
         
         # Step 1: Get visible satellites
-        satellites = await satellite_engine.get_visible_satellites(
-            lat=body.lat,
-            lon=body.lon,
-            elevation=body.elevation,
-            timestamp=timestamp,
+        satellites = await asyncio.wait_for(
+            satellite_engine.get_visible_satellites(
+                lat=body.lat,
+                lon=body.lon,
+                elevation=body.elevation,
+                timestamp=timestamp,
+            ),
+            timeout=settings.satellite_timeout_seconds,
         )
         
         n_total = len(satellites)
@@ -253,6 +300,12 @@ async def analyze_position(
             lon=body.lon,
             radius_m=5000.0,  # 5km radius for terrain
         )
+        if time.time() > deadline:
+            raise asyncio.TimeoutError("analyze deadline exceeded before obstruction stage")
+        if not isinstance(buildings, list):
+            buildings = []
+        if not isinstance(terrain, list):
+            terrain = []
         
         logger.debug(
             f"[{request_id}] Fetched {len(buildings)} buildings, "
@@ -260,7 +313,7 @@ async def analyze_position(
         )
         
         # Step 3: Perform obstruction analysis
-        obstruction_result = obstruction_engine.analyze_position(
+        obstruction_raw = obstruction_engine.analyze_position(
             lat=body.lat,
             lon=body.lon,
             elevation=body.elevation,
@@ -268,7 +321,8 @@ async def analyze_position(
             terrain=terrain,
             satellites=satellites,
         )
-        
+        obstruction_result = _normalize_obstruction_result(obstruction_raw)
+
         n_clear = obstruction_result["n_clear"]
         n_total_calc = obstruction_result.get("n_total", n_total)
         obstruction_pct = obstruction_result["obstruction_pct"]
@@ -317,20 +371,22 @@ async def analyze_position(
 
         satellites_out = [
             SatelliteDetail(
-                id=sd["satellite_id"],
+                id=str(sd.get("satellite_id") or sd.get("id") or "UNKNOWN"),
                 name=sd.get("name", ""),
                 azimuth=sd["azimuth"],
                 elevation=sd["elevation"],
                 range_km=sd.get("range_km"),
-                visible=sd.get("is_visible", True),
-                obstructed=sd.get("is_obstructed", False),
+                visible=_normalize_bool(sd, "visible", "is_visible", True),
+                obstructed=_normalize_bool(sd, "obstructed", "is_obstructed", False),
             )
             for sd in sat_details
+            if isinstance(sd, dict) and ("satellite_id" in sd or "id" in sd) and "azimuth" in sd and "elevation" in sd
         ]
 
         obstructions_out = [
             ObstructionPoint(azimuth=op["azimuth"], elevation=op["elevation"])
             for op in obstruction_profile
+            if isinstance(op, dict) and "azimuth" in op and "elevation" in op
         ]
 
         n_obstructed = sum(1 for s in satellites_out if s.obstructed)
@@ -378,10 +434,23 @@ async def analyze_position(
         
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"[{request_id}] Analysis failed: {e}", exc_info=True)
+    except asyncio.TimeoutError as e:
+        logger.warning(f"[{request_id}] Analysis timed out [timeout]: {e}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Analysis timed out",
+        ) from e
+    except Exception as e:
+        message = str(e).lower()
+        category = "internal_error"
+        if "connection" in message or "timeout" in message:
+            category = "upstream_unavailable"
+        elif "validation" in message:
+            category = "validation"
+        logger.error(f"[{request_id}] Analysis failed [{category}]: {e}", exc_info=True)
+        status_code = status.HTTP_503_SERVICE_UNAVAILABLE if category == "upstream_unavailable" else status.HTTP_500_INTERNAL_SERVER_ERROR
+        raise HTTPException(
+            status_code=status_code,
             detail=f"Analysis failed: {str(e)}",
         )
 
@@ -423,8 +492,7 @@ async def analyze_position(
 async def generate_heatmap(
     request: Request,
     body: HeatmapRequest,
-    redis: aioredis.Redis = Depends(get_redis),
-    db: asyncpg.Connection = Depends(get_db),
+    redis: Any = Depends(get_redis),
     satellite_engine: Any = Depends(get_satellite_engine),
     data_pipeline: Any = Depends(get_data_pipeline),
     obstruction_engine: Any = Depends(get_obstruction_engine),
@@ -436,7 +504,6 @@ async def generate_heatmap(
         request: FastAPI request object.
         body: Heatmap request parameters.
         redis: Redis connection.
-        db: Database connection.
         satellite_engine: Satellite engine instance.
         data_pipeline: Data pipeline instance.
         obstruction_engine: Obstruction engine instance.
@@ -466,6 +533,7 @@ async def generate_heatmap(
             "radius_m": body.radius_m,
             "spacing_m": body.spacing_m,
             "timestamp": cache_ts.isoformat(),
+            "timeout_s": settings.heatmap_timeout_seconds,
         }
         cache_key = _generate_cache_key("heatmap", cache_params)
 
@@ -493,6 +561,7 @@ async def generate_heatmap(
                     f"Increase spacing or decrease radius."
                 ),
             )
+        deadline = start_time + settings.heatmap_timeout_seconds
         
         logger.info(f"[{request_id}] Analyzing {len(grid_points)} grid points")
         
@@ -513,13 +582,20 @@ async def generate_heatmap(
             lon=body.lon,
             radius_m=body.radius_m + 1000.0,  # Extra margin
         )
+        if not isinstance(terrain, list):
+            terrain = []
+        if not terrain:
+            logger.warning("[%s] Terrain unavailable for heatmap, continuing in degraded mode", request_id)
         
         # Get all satellites for the area
-        satellites = await satellite_engine.get_visible_satellites(
-            lat=body.lat,
-            lon=body.lon,
-            elevation=0.0,
-            timestamp=timestamp,
+        satellites = await asyncio.wait_for(
+            satellite_engine.get_visible_satellites(
+                lat=body.lat,
+                lon=body.lon,
+                elevation=0.0,
+                timestamp=timestamp,
+            ),
+            timeout=settings.satellite_timeout_seconds,
         )
 
         # Build data-quality metadata for transparency
@@ -564,8 +640,13 @@ async def generate_heatmap(
         # Analyze each grid point
         features = []
         for idx, (lat, lon) in enumerate(grid_points):
+            if time.time() > deadline:
+                logger.warning("[%s] Heatmap budget exceeded at point %d/%d", request_id, idx, len(grid_points))
+                break
+            if idx and idx % 64 == 0:
+                await asyncio.sleep(0)
             # Analyze position
-            obstruction_result = obstruction_engine.analyze_position(
+            obstruction_raw = obstruction_engine.analyze_position(
                 lat=lat,
                 lon=lon,
                 elevation=0.0,
@@ -573,6 +654,7 @@ async def generate_heatmap(
                 terrain=terrain,
                 satellites=satellites,
             )
+            obstruction_result = _normalize_obstruction_result(obstruction_raw)
 
             n_clear = obstruction_result["n_clear"]
             n_total = obstruction_result["n_total"]
@@ -616,13 +698,16 @@ async def generate_heatmap(
         for bidx, bldg in enumerate(buildings):
             geom = bldg.get("geometry")
             if geom:
-                building_features.append(GeoJSONFeature(
-                    id=f"b{bidx}",
-                    geometry=GeoJSONGeometry(**geom),
-                    properties={
-                        "height": bldg.get("height", 0),
-                    },
-                ))
+                try:
+                    building_features.append(GeoJSONFeature(
+                        id=f"b{bidx}",
+                        geometry=GeoJSONGeometry(**geom),
+                        properties={
+                            "height": bldg.get("height", 0),
+                        },
+                    ))
+                except Exception:
+                    continue
 
         # Build response matching frontend expectations
         response = HeatmapResponse(
@@ -652,9 +737,20 @@ async def generate_heatmap(
         
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"[{request_id}] Heatmap generation failed: {e}", exc_info=True)
+    except asyncio.TimeoutError as e:
+        logger.warning(f"[{request_id}] Heatmap generation timed out [timeout]: {e}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Heatmap generation timed out",
+        ) from e
+    except Exception as e:
+        message = str(e).lower()
+        category = "internal_error"
+        if "connection" in message or "timeout" in message:
+            category = "upstream_unavailable"
+        logger.error(f"[{request_id}] Heatmap generation failed [{category}]: {e}", exc_info=True)
+        status_code = status.HTTP_503_SERVICE_UNAVAILABLE if category == "upstream_unavailable" else status.HTTP_500_INTERNAL_SERVER_ERROR
+        raise HTTPException(
+            status_code=status_code,
             detail=f"Heatmap generation failed: {str(e)}",
         )

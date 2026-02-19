@@ -9,7 +9,13 @@ const log = require('electron-log');
  * Setup auto-updater with logging.
  * Updates are checked on launch and can be triggered manually.
  */
-function setupUpdater() {
+function setupUpdater(options = {}) {
+  const enabled = options.enabled !== false;
+  if (!enabled) {
+    log.info('Auto-updater disabled by config');
+    return;
+  }
+
   autoUpdater.logger = log;
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
@@ -35,7 +41,12 @@ function setupUpdater() {
   });
 
   autoUpdater.on('error', (error) => {
-    log.warn('Auto-updater error:', error.message);
+    const message = String(error?.message || '');
+    let category = 'unknown';
+    if (/ENOTFOUND|EAI_AGAIN|network/i.test(message)) category = 'dns_network';
+    if (/proxy|407|certificate/i.test(message)) category = 'proxy_or_tls';
+    if (/401|403|auth/i.test(message)) category = 'auth';
+    log.warn(`Auto-updater error [${category}]:`, message);
   });
 
   // Check for updates after a short delay (don't block startup)

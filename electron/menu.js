@@ -11,6 +11,7 @@ const { app, Menu, shell } = require('electron');
  * @param {Function} options.getMainWindow - Returns the main BrowserWindow
  */
 function createMenu({ onPreferences, getMainWindow }) {
+  // TODO: Add platform-aware accelerators and menu labels; this template is currently macOS-centric.
   const template = [
     // App menu
     {
@@ -57,6 +58,7 @@ function createMenu({ onPreferences, getMainWindow }) {
           accelerator: 'Cmd+R',
           click: () => {
             const win = getMainWindow();
+            // TODO: Guard IPC sends with window liveness checks to avoid dropped events during teardown.
             if (win) win.webContents.send('refresh-map');
           }
         },
@@ -83,6 +85,7 @@ function createMenu({ onPreferences, getMainWindow }) {
           accelerator: 'Cmd+F',
           click: () => {
             const win = getMainWindow();
+            // TODO: Add platform-specific accelerators and optional command-palette fallback.
             if (win) win.webContents.send('focus-search');
           }
         },
@@ -91,6 +94,7 @@ function createMenu({ onPreferences, getMainWindow }) {
           accelerator: 'Cmd+L',
           click: () => {
             const win = getMainWindow();
+            // TODO: Track command origin so location actions can be throttled from repeated hotkey mashing.
             if (win) win.webContents.send('go-to-location');
           }
         }
@@ -114,6 +118,7 @@ function createMenu({ onPreferences, getMainWindow }) {
       submenu: [
         {
           label: 'LinkSpot Documentation',
+          // TODO: Validate external URL allowlist before openExternal for security/compliance.
           click: () => {
             shell.openExternal('https://github.com/linkspot/linkspot#readme');
           }

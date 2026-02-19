@@ -5,6 +5,22 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
+function registerListener(channel, callback, mapper = (...args) => args) {
+  if (typeof callback !== 'function') {
+    return () => {};
+  }
+  const handler = (...args) => {
+    const mapped = mapper(...args);
+    if (Array.isArray(mapped)) {
+      callback(...mapped);
+      return;
+    }
+    callback(mapped);
+  };
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.removeListener(channel, handler);
+}
+
 contextBridge.exposeInMainWorld('electronAPI', {
   // Platform info
   platform: process.platform,
@@ -23,23 +39,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Menu command listeners
   onFocusSearch: (callback) => {
-    ipcRenderer.on('focus-search', () => callback());
-    return () => ipcRenderer.removeAllListeners('focus-search');
+    return registerListener('focus-search', callback, () => []);
   },
   onRefreshMap: (callback) => {
-    ipcRenderer.on('refresh-map', () => callback());
-    return () => ipcRenderer.removeAllListeners('refresh-map');
+    return registerListener('refresh-map', callback, () => []);
   },
   onGoToLocation: (callback) => {
-    ipcRenderer.on('go-to-location', () => callback());
-    return () => ipcRenderer.removeAllListeners('go-to-location');
+    return registerListener('go-to-location', callback, () => []);
   },
   onSettingsChanged: (callback) => {
-    ipcRenderer.on('settings-changed', (_event, settings) => callback(settings));
-    return () => ipcRenderer.removeAllListeners('settings-changed');
+    return registerListener('settings-changed', callback, (_event, settings) => settings);
   },
   onBackendStatus: (callback) => {
-    ipcRenderer.on('backend-status', (_event, status) => callback(status));
-    return () => ipcRenderer.removeAllListeners('backend-status');
+    return registerListener('backend-status', callback, (_event, status) => {
+      if (!status || typeof status !== 'object') {
+        return { connected: false };
+      }
+      return { connected: Boolean(status.connected) };
+    });
   }
 });

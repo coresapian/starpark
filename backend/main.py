@@ -6,6 +6,7 @@
 
 """LinkSpot FastAPI application entry point."""
 
+import json
 import logging
 import sys
 import time
@@ -48,8 +49,6 @@ def configure_logging() -> None:
     
     # Configure JSON logging if requested
     if settings.log_format == "json":
-        import json
-        
         class JSONFormatter(logging.Formatter):
             """JSON log formatter for structured logging."""
             
@@ -66,6 +65,14 @@ def configure_logging() -> None:
                     log_data["request_id"] = record.request_id
                 if hasattr(record, "duration_ms"):
                     log_data["duration_ms"] = record.duration_ms
+                if hasattr(record, "category"):
+                    log_data["category"] = record.category
+                if hasattr(record, "status_code"):
+                    log_data["status_code"] = record.status_code
+                if hasattr(record, "status_class"):
+                    log_data["status_class"] = record.status_class
+                if hasattr(record, "client_ip"):
+                    log_data["client_ip"] = record.client_ip
                 if record.exc_info:
                     log_data["exception"] = self.formatException(record.exc_info)
                 
@@ -101,21 +108,29 @@ async def lifespan(app: FastAPI):
         f"Starting {settings.app_name} v{settings.app_version} "
         f"in {settings.environment} mode"
     )
-    
+    startup_warnings: list[tuple[str, Exception]] = []
+
+    # Initialize database pool (degraded startup allowed).
     try:
-        # Initialize database pool
         await get_db_pool()
         logger.info("Database connection pool initialized")
-        
-        # Initialize Redis pool
+    except Exception as e:
+        startup_warnings.append(("database", e))
+        logger.warning("Database init failed; continuing in degraded mode: %s", e)
+
+    # Initialize Redis pool (fallbacks handled in dependency module).
+    try:
         await get_redis_pool()
         logger.info("Redis connection pool initialized")
-        
-        logger.info("Application startup complete")
-        
     except Exception as e:
-        logger.error(f"Startup failed: {e}", exc_info=True)
-        raise
+        startup_warnings.append(("redis", e))
+        logger.warning("Redis init failed; continuing in degraded mode: %s", e)
+
+    app.state.startup_warnings = startup_warnings
+    if startup_warnings:
+        logger.warning("Application started in degraded mode with %d dependency warnings", len(startup_warnings))
+    else:
+        logger.info("Application startup complete")
     
     yield
     
@@ -142,6 +157,7 @@ def create_application() -> FastAPI:
     Returns:
         FastAPI: Configured application instance.
     """
+    # TODO: Keep doc endpoints behind an explicit debug or ops flag instead of reusing debug alone.
     app = FastAPI(
         title=settings.app_name,
         description="""
@@ -196,6 +212,7 @@ def create_application() -> FastAPI:
     app.include_router(satellites.router)
     app.include_router(route.router)
     app.include_router(health.router)
+    # TODO: Standardize route versioning and remove direct root route coupling from app setup.
     
     return app
 
@@ -221,9 +238,11 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
     """
     request_id = getattr(request.state, "request_id", str(uuid.uuid4())[:12])
     
+    category = "internal_error"
     logger.error(
-        f"[{request_id}] Unhandled exception: {exc}",
+        f"[{request_id}] Unhandled exception [{category}]: {exc}",
         exc_info=True,
+        extra={"request_id": request_id, "category": category},
     )
     
     problem = ProblemDetail(
@@ -292,10 +311,12 @@ async def request_logging_middleware(request: Request, call_next: Any) -> Any:
     
     # Log request start
     start_time = time.time()
+    client_ip = request.client.host if request.client else "unknown"
     logger.info(
         f"[{request_id}] {request.method} {request.url.path} - Started",
-        extra={"request_id": request_id},
+        extra={"request_id": request_id, "client_ip": client_ip},
     )
+    # TODO: Avoid logging request bodies for all verbs by default; this currently adds per-request overhead.
     
     # Process request
     try:
@@ -303,6 +324,7 @@ async def request_logging_middleware(request: Request, call_next: Any) -> Any:
         
         # Calculate duration
         duration_ms = (time.time() - start_time) * 1000
+        status_class = f"{response.status_code // 100}xx"
         
         # Log request completion
         logger.info(
@@ -311,8 +333,12 @@ async def request_logging_middleware(request: Request, call_next: Any) -> Any:
             extra={
                 "request_id": request_id,
                 "duration_ms": round(duration_ms, 2),
+                "status_code": response.status_code,
+                "status_class": status_class,
+                "client_ip": client_ip,
             },
         )
+        # TODO: Add structured fields for client IP and status class summaries.
         
         # Add request ID to response headers
         response.headers["X-Request-ID"] = request_id
@@ -327,6 +353,9 @@ async def request_logging_middleware(request: Request, call_next: Any) -> Any:
             extra={
                 "request_id": request_id,
                 "duration_ms": round(duration_ms, 2),
+                "status_class": "5xx",
+                "client_ip": client_ip,
+                "category": "request_failure",
             },
             exc_info=True,
         )

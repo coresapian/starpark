@@ -46,16 +46,29 @@ class LinkSpotApp {
             routePlan: null,
             selectedPoint: null,
             searchDebounceTimer: null,
+            searchAbortController: null,
             animationTimer: null,
             lastHeatMapRequest: null,
-            lastScannedCenter: null
+            lastScannedCenter: null,
+            destinationMarker: null,
+            locationMarker: null
         };
         
         // API Client
         this.api = new APIClient({ baseURL: this.config.apiBaseURL });
+        // TODO: Inject API client for testing and failover behavior instead of hard-instantiating a single instance.
         
         // Sky Plot
         this.skyPlot = null;
+        this.effectsEngine = null;
+        this.statusBar = null;
+        this.commandPanel = null;
+        this.intelPanel = null;
+        this.routeRenderer = null;
+        this._routeAbortController = null;
+        this._lastToastKey = null;
+        this._lastToastAt = 0;
+        this._searchCache = new Map();
         
         // DOM Elements cache
         this.elements = {};
@@ -76,29 +89,41 @@ class LinkSpotApp {
      */
     async init() {
         console.log('[LinkSpot] Initializing...');
+        // TODO: Add a degraded-mode path if optional module scripts fail to load.
         
         // Cache DOM elements
         this.cacheElements();
         this.initializeRouteAutoClearPreference();
+        if (window.lucide && typeof window.lucide.createIcons === 'function') {
+            window.lucide.createIcons();
+        }
         
         // Initialize map
         this.initMap();
         
         // Initialize sky plot
         this.initSkyPlot();
+
+        // Initialize module wrappers
+        this.initModules();
         
         // Setup event listeners
         this.setupEventListeners();
+        this.setupElectronShortcuts();
         
         // Set initial time
         this.setCurrentTime(new Date());
         this.updateRoutePlanButtonState();
+
+        if (this.effectsEngine) {
+            this.effectsEngine.bootSequence().catch(() => {});
+        }
         
         // Check backend connectivity
         await this.checkBackendHealth();
 
         // Try to get user's location
-        await this.centerOnGPS();
+        await this.centerOnGPS({ silent: true });
         
         // Load initial heat map
         if (this.state.currentPosition) {
@@ -116,8 +141,28 @@ class LinkSpotApp {
             window.electronAPI.onBackendStatus((status) => {
                 if (status.connected) {
                     this._hideBackendBanner();
+                    if (this.statusBar) this.statusBar.updateLED('backend', 'green');
                 } else {
                     this._showBackendBanner();
+                    if (this.statusBar) this.statusBar.updateLED('backend', 'red');
+                }
+
+                if (this.statusBar && Array.isArray(status.components)) {
+                    const lookup = {};
+                    status.components.forEach((component) => {
+                        if (component && component.name) {
+                            lookup[String(component.name)] = String(component.status || 'unknown');
+                        }
+                    });
+                    const mapStatus = (value) => {
+                        if (value === 'healthy') return 'green';
+                        if (value === 'degraded') return 'amber';
+                        if (value === 'unhealthy') return 'red';
+                        return 'unknown';
+                    };
+                    this.statusBar.updateLED('buildings', mapStatus(lookup.data_pipeline));
+                    this.statusBar.updateLED('satellites', mapStatus(lookup.satellite_engine));
+                    this.statusBar.updateLED('terrain', mapStatus(lookup.data_pipeline));
                 }
             });
         }
@@ -193,9 +238,11 @@ class LinkSpotApp {
             subdomains: 'abcd',
             maxZoom: 20
         }).addTo(this.state.map);
+        // TODO: Handle tile-layer load failures and show degraded map warning on offline/offline CORS errors.
         
         // currentPosition is only set by GPS or search — never from defaults
         this.state.currentPosition = null;
+        // TODO: Introduce a separate `mapCenter` state so route origins can be derived from pan center reliably.
 
         // Show "Scan this area" button when map pans away from last scan
         this.state.map.on('moveend', () => {
@@ -216,6 +263,7 @@ class LinkSpotApp {
                 }
             }
         });
+        // TODO: Debounce moveend updates to prevent flicker and repeated DOM work on high-frequency pans.
     }
     
     /**
@@ -225,12 +273,54 @@ class LinkSpotApp {
     initSkyPlot() {
         if (this.elements.skyPlotCanvas) {
             this.skyPlot = new SkyPlot(this.elements.skyPlotCanvas, {
-                satelliteColor: '#e94560',
-                obstructedColor: '#6c757d',
-                obstructionFill: 'rgba(108, 117, 125, 0.3)',
-                gridColor: 'rgba(255, 255, 255, 0.2)',
-                textColor: '#a0a0a0'
+                satelliteColor: '#2dd4bf',
+                obstructedColor: '#64748b',
+                obstructionFill: 'rgba(239, 68, 68, 0.22)',
+                obstructionStroke: 'rgba(248, 113, 113, 0.8)',
+                gridColor: 'rgba(45, 212, 191, 0.24)',
+                textColor: '#93c5fd',
+                cardinalColor: '#e2e8f0',
+                horizonColor: 'rgba(34, 197, 94, 0.7)'
             });
+        }
+    }
+
+    /**
+     * Initialize optional UI modules for Mission Control layout.
+     */
+    initModules() {
+        if (typeof EffectsEngine !== 'undefined') {
+            this.effectsEngine = new EffectsEngine({
+                shell: document.getElementById('app-shell'),
+                signalLost: document.getElementById('signal-lost')
+            });
+        } else {
+            // TODO: Add a soft warning when EffectsEngine fails to load in resource-constrained environments.
+        }
+
+        if (typeof StatusBar !== 'undefined') {
+            this.statusBar = new StatusBar();
+            this.statusBar.startClock();
+            this.statusBar.updateGPS(false);
+            this.statusBar.updateLED('backend', 'unknown');
+            this.statusBar.updateLED('routing', 'unknown');
+        }
+
+        if (typeof CommandPanel !== 'undefined') {
+            this.commandPanel = new CommandPanel();
+            this.commandPanel.init(this);
+        }
+
+        if (typeof IntelPanel !== 'undefined') {
+            this.intelPanel = new IntelPanel();
+            this.intelPanel.init(this);
+        }
+
+        if (typeof RouteRenderer !== 'undefined') {
+            this.routeRenderer = new RouteRenderer();
+            this.routeRenderer.init(this.state.map);
+        } else {
+            // TODO: Fallback to native Leaflet rendering for route overlays when modular renderer is unavailable.
         }
     }
     
@@ -348,6 +438,34 @@ class LinkSpotApp {
             }
         });
     }
+
+    /**
+     * Register Electron menu IPC hooks via preload bridge.
+     * @private
+     */
+    setupElectronShortcuts() {
+        if (!window.electronAPI) return;
+        if (typeof window.electronAPI.onFocusSearch === 'function') {
+            window.electronAPI.onFocusSearch(() => {
+                if (this.elements.searchInput) this.elements.searchInput.focus();
+            });
+        }
+        if (typeof window.electronAPI.onRefreshMap === 'function') {
+            window.electronAPI.onRefreshMap(() => {
+                if (this.state.currentPosition) {
+                    const pos = this.state.currentPosition;
+                    this.state.lastHeatMapRequest = null;
+                    this.state.lastScannedCenter = null;
+                    this.loadHeatMap(pos.lat, pos.lon);
+                }
+            });
+        }
+        if (typeof window.electronAPI.onGoToLocation === 'function') {
+            window.electronAPI.onGoToLocation(() => {
+                this.centerOnGPS();
+            });
+        }
+    }
     
     // ============================================
     // MAP & HEAT MAP
@@ -365,6 +483,7 @@ class LinkSpotApp {
         if (requestKey === this.state.lastHeatMapRequest) {
             return;
         }
+        // TODO: Replace fixed decimal keying with distance-aware buckets to avoid false dedupe near boundaries.
 
         // Prevent concurrent requests
         if (this._heatmapLoading) {
@@ -391,9 +510,18 @@ class LinkSpotApp {
 
         } catch (error) {
             console.error('[LinkSpot] Failed to load heat map:', error);
-            this.showToast('Failed to load heat map data', 'error');
+            if (error instanceof APIError && error.status === 408) {
+                this.showToast(
+                    'Heat map request timed out. Try scanning a smaller area or retry.',
+                    'warning',
+                    5200
+                );
+            } else {
+                this.showToast('Failed to load heat map data', 'error');
+            }
             // Clear the request key so the user can retry
             this.state.lastHeatMapRequest = null;
+            // TODO: Add retry delay with exponential backoff for transient timeout failures.
         } finally {
             this._heatmapLoading = false;
             this.setLoading(false);
@@ -409,6 +537,7 @@ class LinkSpotApp {
         if (this.state.gridLayer) {
             this.state.map.removeLayer(this.state.gridLayer);
         }
+        // TODO: Handle empty/invalid heatmap payloads before trying to create GeoJSON layers.
         
         // Create new grid layer
         this.state.gridLayer = L.geoJSON(geojsonData, {
@@ -482,7 +611,9 @@ class LinkSpotApp {
         if (!this.elements.routePlanBtn) return;
         const hasOrigin = !!(this.state.routeOrigin || this.state.currentPosition);
         const hasDestinationText = this.elements.searchInput.value.trim().length > 1;
-        this.elements.routePlanBtn.classList.toggle('hidden', !(hasOrigin && hasDestinationText));
+        const canPlan = hasOrigin && hasDestinationText;
+        this.elements.routePlanBtn.classList.toggle('hidden', !canPlan);
+        this.elements.routePlanBtn.disabled = !canPlan || !!this._routeLoading;
     }
 
     /**
@@ -490,24 +621,25 @@ class LinkSpotApp {
      */
     clearRoutePlan() {
         this.resetRouteSummaryPanel();
-        if (!this.state.map) {
-            this.state.routePlan = null;
-            return;
+        if (this.routeRenderer) {
+            this.routeRenderer.clear();
+        } else if (this.state.map) {
+            if (this.state.routeLayer) {
+                this.state.map.removeLayer(this.state.routeLayer);
+                this.state.routeLayer = null;
+            }
+            if (this.state.waypointLayer) {
+                this.state.map.removeLayer(this.state.waypointLayer);
+                this.state.waypointLayer = null;
+            }
+            if (this.state.deadZoneLayer) {
+                this.state.map.removeLayer(this.state.deadZoneLayer);
+                this.state.deadZoneLayer = null;
+            }
         }
 
-        if (this.state.routeLayer) {
-            this.state.map.removeLayer(this.state.routeLayer);
-            this.state.routeLayer = null;
-        }
-        if (this.state.waypointLayer) {
-            this.state.map.removeLayer(this.state.waypointLayer);
-            this.state.waypointLayer = null;
-        }
-        if (this.state.deadZoneLayer) {
-            this.state.map.removeLayer(this.state.deadZoneLayer);
-            this.state.deadZoneLayer = null;
-        }
         this.state.routePlan = null;
+        // TODO: Keep lightweight route cache if user wants diff route comparison instead of always discarding.
     }
 
     /**
@@ -597,6 +729,10 @@ class LinkSpotApp {
      * Plan a route from current position to the search destination.
      */
     async planRouteFromSearch() {
+        if (this._routeLoading) {
+            this.showToast('Route planning already in progress', 'info', 1800);
+            return;
+        }
         const destinationText = this.elements.searchInput.value.trim();
         if (!destinationText) {
             this.showToast('Enter a destination in search to plan a route', 'warning');
@@ -635,7 +771,9 @@ class LinkSpotApp {
     async loadRoutePlan(origin, destination) {
         if (this._routeLoading) return;
         this._routeLoading = true;
+        this._routeAbortController = new AbortController();
         this.setLoading(true);
+        this.updateRoutePlanButtonState();
         if (this.elements.routePlanBtn) {
             this.elements.routePlanBtn.classList.add('loading');
         }
@@ -645,17 +783,45 @@ class LinkSpotApp {
                 origin,
                 destination,
                 this.config.routeSampleInterval,
-                this.state.currentTimestamp
+                this.state.currentTimestamp,
+                this._routeAbortController.signal
             );
             this.state.routePlan = routePlan;
             this.renderRoutePlan(routePlan);
             this.updateRouteSummaryPanel(routePlan);
+            if (this.commandPanel) {
+                this.commandPanel.populateWaypoints(routePlan.waypoints || []);
+            }
+            if (this.intelPanel) {
+                this.intelPanel.updateMissionBrief(routePlan.mission_summary || {});
+                this.intelPanel.updateDataQuality(routePlan.data_quality || null);
+            }
+            if (this.statusBar) {
+                this.statusBar.updateLED('routing', 'green');
+                this.statusBar.updateFromDataQuality(routePlan.data_quality || null);
+            }
         } catch (error) {
             console.error('[LinkSpot] Route planning failed:', error);
-            this.showToast('Failed to plan route', 'error');
+            if (error instanceof APIError && error.status === 408) {
+                this.showToast(
+                    'Route planning timed out. Try a shorter route or larger sample interval.',
+                    'warning',
+                    6200
+                );
+            } else {
+                this.showToast('Failed to plan route', 'error');
+            }
+            if (this.statusBar) {
+                this.statusBar.updateLED('routing', 'red');
+            }
+            if (this.effectsEngine && this.elements.routePlanBtn) {
+                this.effectsEngine.glitch(this.elements.routePlanBtn);
+            }
         } finally {
             this._routeLoading = false;
+            this._routeAbortController = null;
             this.setLoading(false);
+            this.updateRoutePlanButtonState();
             if (this.elements.routePlanBtn) {
                 this.elements.routePlanBtn.classList.remove('loading');
             }
@@ -669,6 +835,18 @@ class LinkSpotApp {
     renderRoutePlan(routePlan) {
         this.clearRoutePlan();
         if (!routePlan || !this.state.map) return;
+        if (!routePlan.route_geojson || !Array.isArray(routePlan.route_geojson.features)) {
+            this.showToast('Route payload missing geometry', 'warning');
+            return;
+        }
+
+        if (this.routeRenderer) {
+            this.routeRenderer.renderRoute(routePlan.route_geojson);
+            this.routeRenderer.renderWaypoints(routePlan.waypoints || []);
+            this.routeRenderer.renderDeadZones(routePlan.dead_zones || []);
+            this.routeRenderer.finalizeView();
+            return;
+        }
 
         const routeGeoJson = routePlan.route_geojson;
         if (routeGeoJson && Array.isArray(routeGeoJson.features)) {
@@ -884,15 +1062,24 @@ class LinkSpotApp {
         
         // Debounce search
         clearTimeout(this.state.searchDebounceTimer);
+        if (this.state.searchAbortController) {
+            this.state.searchAbortController.abort();
+            this.state.searchAbortController = null;
+        }
         
         if (query.length < 3) {
             this.hideSearchResults();
             return;
         }
+        const normalized = query.trim().toLowerCase();
+        if (this._searchCache.has(normalized)) {
+            this.displaySearchResults(this._searchCache.get(normalized));
+            return;
+        }
         
         this.state.searchDebounceTimer = setTimeout(() => {
             this.fetchSearchSuggestions(query);
-        }, 300);
+        }, 350);
     }
     
     /**
@@ -901,18 +1088,35 @@ class LinkSpotApp {
      * @param {string} query - Search query
      */
     async fetchSearchSuggestions(query) {
+        let timeoutId = null;
         try {
+            const controller = new AbortController();
+            this.state.searchAbortController = controller;
+            timeoutId = setTimeout(() => controller.abort(), 8000);
             const response = await fetch(
                 `https://nominatim.openstreetmap.org/search?` +
                 `format=json&q=${encodeURIComponent(query)}&limit=5`,
-                { headers: { 'Accept-Language': 'en' } }
+                {
+                    headers: { 'Accept-Language': 'en' },
+                    signal: controller.signal
+                }
             );
-            
+
             const results = await response.json();
+            const normalized = query.trim().toLowerCase();
+            this._searchCache.set(normalized, results);
+            if (this._searchCache.size > 40) {
+                const firstKey = this._searchCache.keys().next().value;
+                this._searchCache.delete(firstKey);
+            }
             this.displaySearchResults(results);
             
         } catch (error) {
+            if (error.name === 'AbortError') return;
             console.error('[LinkSpot] Search failed:', error);
+        } finally {
+            if (timeoutId) clearTimeout(timeoutId);
+            this.state.searchAbortController = null;
         }
     }
     
@@ -963,6 +1167,7 @@ class LinkSpotApp {
      * @param {string} name - Location name
      */
     selectSearchResult(lat, lon, name) {
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
         if (this.state.routePlan) {
             if (this.shouldAutoClearRouteOnNewSelection()) {
                 this.clearRoutePlan();
@@ -977,6 +1182,10 @@ class LinkSpotApp {
 
         // Update search input
         this.elements.searchInput.value = name;
+        const missionDestinationInput = document.getElementById('mission-destination');
+        if (missionDestinationInput && !missionDestinationInput.value.trim()) {
+            missionDestinationInput.value = name;
+        }
         this.hideSearchResults();
         
         const previousCenter = this.state.map.getCenter();
@@ -995,6 +1204,13 @@ class LinkSpotApp {
         this.state.map.setView([lat, lon], 17);
 
         this.state.currentPosition = { lat, lon };
+        if (this.state.destinationMarker) {
+            this.state.map.removeLayer(this.state.destinationMarker);
+            this.state.destinationMarker = null;
+        }
+        this.state.destinationMarker = L.marker([lat, lon])
+            .addTo(this.state.map)
+            .bindPopup(name || 'Destination');
         this.updateRoutePlanButtonState();
         
         // Load heat map
@@ -1030,6 +1246,17 @@ class LinkSpotApp {
         if (!query.trim()) return;
         
         this.setLoading(true);
+        const normalized = query.trim().toLowerCase();
+        if (this._searchCache.has(normalized) && this._searchCache.get(normalized).length > 0) {
+            const cached = this._searchCache.get(normalized)[0];
+            this.selectSearchResult(
+                parseFloat(cached.lat),
+                parseFloat(cached.lon),
+                cached.display_name.split(',')[0]
+            );
+            this.setLoading(false);
+            return;
+        }
         
         try {
             const response = await fetch(
@@ -1065,11 +1292,15 @@ class LinkSpotApp {
     
     /**
      * Center map on user's GPS location
+     * @param {{silent?: boolean}} [options] - Suppress user-facing toasts on failure
      * @returns {Promise<void>}
      */
-    async centerOnGPS() {
+    async centerOnGPS(options = {}) {
+        const silent = !!options.silent;
         if (!navigator.geolocation) {
-            this.showToast('Geolocation is not supported', 'error');
+            if (!silent) {
+                this.showToast('Geolocation is not supported', 'error');
+            }
             return;
         }
         
@@ -1090,29 +1321,47 @@ class LinkSpotApp {
             this.state.map.setView([latitude, longitude], 17);
             this.state.currentPosition = { lat: latitude, lon: longitude };
             this.state.routeOrigin = { lat: latitude, lon: longitude };
+            const missionOriginInput = document.getElementById('mission-origin');
+            if (missionOriginInput) {
+                missionOriginInput.value = `${latitude.toFixed(6)},${longitude.toFixed(6)}`;
+            }
             this.updateRoutePlanButtonState();
             
-            // Add marker
-            L.marker([latitude, longitude])
-                .addTo(this.state.map)
-                .bindPopup('Your Location')
-                .openPopup();
+            // Reuse a single location marker to avoid accumulating map objects.
+            if (!this.state.locationMarker) {
+                this.state.locationMarker = L.marker([latitude, longitude])
+                    .addTo(this.state.map)
+                    .bindPopup('Your Location');
+            } else {
+                this.state.locationMarker.setLatLng([latitude, longitude]);
+            }
+            this.state.locationMarker.openPopup();
             
             // Load heat map
             await this.loadHeatMap(latitude, longitude);
             
             this.elements.gpsBtn.classList.add('active');
-            this.showToast('Location found', 'success');
+            if (!silent) {
+                this.showToast('Location found', 'success');
+            }
+            if (this.statusBar) {
+                this.statusBar.updateGPS(true);
+            }
             
         } catch (error) {
-            console.error('[LinkSpot] GPS error:', error);
+            console.warn('[LinkSpot] GPS error:', error);
             
             let message = 'Unable to get location';
             if (error.code === 1) message = 'Location permission denied';
             if (error.code === 2) message = 'Location unavailable';
             if (error.code === 3) message = 'Location request timeout';
             
-            this.showToast(message, 'error');
+            if (!silent) {
+                this.showToast(message, 'error');
+            }
+            if (this.statusBar) {
+                this.statusBar.updateGPS(false);
+            }
         } finally {
             this.elements.gpsBtn.classList.remove('loading');
         }
@@ -1129,6 +1378,10 @@ class LinkSpotApp {
      * @param {Object} data - Point data
      */
     async showPointDetails(lat, lon, data = {}) {
+        if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+            this.showToast('Invalid map coordinates', 'warning');
+            return;
+        }
         this.state.selectedPoint = { lat, lon };
         
         // Update panel content
@@ -1150,11 +1403,16 @@ class LinkSpotApp {
             <span>${statusText[status]?.substring(2) || 'Unknown'}</span>
         `;
         
-        // Show panel
-        this.elements.detailPanel.classList.add('open');
-        this.elements.detailPanel.setAttribute('aria-hidden', 'false');
-        this.elements.detailBackdrop.classList.add('visible');
-        document.body.style.overflow = 'hidden';
+        // Legacy detail panel is optional in Mission Control layout.
+        const canOpenDetailPanel = this.elements.detailPanel &&
+            !this.elements.detailPanel.classList.contains('hidden');
+        if (canOpenDetailPanel) {
+            this.elements.detailPanel.classList.add('open');
+            this.elements.detailPanel.setAttribute('aria-hidden', 'false');
+            this.elements.detailBackdrop.classList.add('visible');
+            document.body.style.overflow = 'hidden';
+        }
+        // TODO: Add non-panel fallback for mobile/small viewports where full dialog steals focus.
         
         // Fetch detailed analysis
         try {
@@ -1172,17 +1430,28 @@ class LinkSpotApp {
      * @param {Object} analysis - Analysis result
      */
     updateDetailPanel(analysis) {
+        const normalizedSatellites = (analysis.satellites || []).map((sat) => ({
+            ...sat,
+            id: sat.id || sat.satellite_id || 'SAT',
+            visible: sat.visible ?? sat.is_visible ?? false,
+            obstructed: sat.obstructed ?? sat.is_obstructed ?? false
+        }));
+
         // Update sky plot
-        if (this.skyPlot && analysis.satellites) {
+        if (this.skyPlot && normalizedSatellites) {
             this.skyPlot.setData(
-                analysis.satellites,
+                normalizedSatellites,
                 analysis.obstructions || []
             );
         }
+
+        if (this.intelPanel) {
+            this.intelPanel.updateAnalysis(analysis);
+        }
         
         // Update satellite list
-        if (analysis.satellites) {
-            const visibleSats = analysis.satellites.filter(s => s.visible && !s.obstructed);
+        if (normalizedSatellites) {
+            const visibleSats = normalizedSatellites.filter(s => s.visible && !s.obstructed);
             
             this.elements.satelliteList.innerHTML = visibleSats.map(sat => `
                 <li class="satellite-item">
@@ -1197,6 +1466,19 @@ class LinkSpotApp {
         
         // Update analysis stats
         if (analysis.visibility) {
+            if (this.commandPanel) {
+                const total = Number(analysis.visibility.total_satellites || 0);
+                const visible = Number(analysis.visibility.visible_satellites || 0);
+                this.commandPanel.updateStats({
+                    visible_satellites: visible,
+                    obstructed_satellites: analysis.visibility.obstructed_satellites,
+                    coverage_pct: total > 0 ? (visible / total) * 100 : 0,
+                    status: analysis.visibility.status || 'unknown'
+                });
+            }
+            if (this.statusBar) {
+                this.statusBar.updateFromDataQuality(analysis.data_quality || null);
+            }
             this.elements.analysisStats.innerHTML = `
                 <div class="stat-item">
                     <div class="stat-value">${analysis.visibility.visible_satellites}</div>
@@ -1235,9 +1517,13 @@ class LinkSpotApp {
      * Close detail panel
      */
     closeDetailPanel() {
-        this.elements.detailPanel.classList.remove('open');
-        this.elements.detailPanel.setAttribute('aria-hidden', 'true');
-        this.elements.detailBackdrop.classList.remove('visible');
+        if (this.elements.detailPanel) {
+            this.elements.detailPanel.classList.remove('open');
+            this.elements.detailPanel.setAttribute('aria-hidden', 'true');
+        }
+        if (this.elements.detailBackdrop) {
+            this.elements.detailBackdrop.classList.remove('visible');
+        }
         document.body.style.overflow = '';
         this.state.selectedPoint = null;
     }
@@ -1252,6 +1538,7 @@ class LinkSpotApp {
     updateLegend() {
         // Legend updates can be implemented based on view context
         // For now, the legend is static
+        // TODO: Implement dynamic legend scaling based on current data range and route quality bands.
     }
     
     // ============================================
@@ -1274,6 +1561,13 @@ class LinkSpotApp {
      * @param {number} duration - Display duration in ms
      */
     showToast(message, type = 'info', duration = 3000) {
+        const key = `${type}:${message}`;
+        const now = Date.now();
+        if (this._lastToastKey === key && (now - this._lastToastAt) < 1200) {
+            return;
+        }
+        this._lastToastKey = key;
+        this._lastToastAt = now;
         const toast = document.createElement('div');
         toast.className = `toast ${type}`;
         toast.textContent = message;
@@ -1324,6 +1618,7 @@ class LinkSpotApp {
     handleOnline() {
         this.elements.offlineIndicator.classList.remove('visible');
         this.showToast('Back online', 'success');
+        if (this.effectsEngine) this.effectsEngine.signalLost(false);
     }
     
     /**
@@ -1333,6 +1628,7 @@ class LinkSpotApp {
     handleOffline() {
         this.elements.offlineIndicator.classList.add('visible');
         this.showToast('You are offline', 'warning');
+        if (this.effectsEngine) this.effectsEngine.signalLost(true);
     }
     
     /**
@@ -1343,8 +1639,14 @@ class LinkSpotApp {
         try {
             await this.api.healthCheck();
             this._hideBackendBanner();
+            if (this.statusBar) {
+                this.statusBar.updateLED('backend', 'green');
+            }
         } catch (error) {
             this._showBackendBanner();
+            if (this.statusBar) {
+                this.statusBar.updateLED('backend', 'red');
+            }
         }
     }
 
@@ -1402,9 +1704,24 @@ class LinkSpotApp {
     destroy() {
         // Stop animation
         this.stopAnimation();
+        if (this._routeAbortController) {
+            this._routeAbortController.abort();
+            this._routeAbortController = null;
+        }
+        if (this.state.searchAbortController) {
+            this.state.searchAbortController.abort();
+            this.state.searchAbortController = null;
+        }
 
         // Remove route overlays
         this.clearRoutePlan();
+        if (this.routeRenderer) {
+            this.routeRenderer.clear();
+            this.routeRenderer = null;
+        }
+        if (this.statusBar) {
+            this.statusBar.stopClock();
+        }
         
         // Remove event listeners
         window.removeEventListener('resize', this.handleResize);
@@ -1413,6 +1730,14 @@ class LinkSpotApp {
         
         // Destroy map
         if (this.state.map) {
+            if (this.state.destinationMarker) {
+                this.state.map.removeLayer(this.state.destinationMarker);
+                this.state.destinationMarker = null;
+            }
+            if (this.state.locationMarker) {
+                this.state.map.removeLayer(this.state.locationMarker);
+                this.state.locationMarker = null;
+            }
             this.state.map.remove();
             this.state.map = null;
         }

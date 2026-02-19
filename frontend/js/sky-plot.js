@@ -46,24 +46,44 @@ class SkyPlot {
         
         // Colors
         this.colors = {
-            satellite: options.satelliteColor || '#e94560',
+            satellite: options.satelliteColor || '#2dd4bf',
             obstructed: options.obstructedColor || '#6c757d',
-            obstructionFill: options.obstructionFill || 'rgba(108, 117, 125, 0.3)',
-            obstructionStroke: options.obstructionStroke || '#495057',
-            grid: options.gridColor || 'rgba(255, 255, 255, 0.2)',
-            text: options.textColor || '#a0a0a0',
-            horizon: options.horizonColor || 'rgba(46, 139, 87, 0.5)',
-            cardinal: options.cardinalColor || '#eaeaea'
+            obstructionFill: options.obstructionFill || 'rgba(239, 68, 68, 0.22)',
+            obstructionStroke: options.obstructionStroke || 'rgba(248, 113, 113, 0.8)',
+            grid: options.gridColor || 'rgba(45, 212, 191, 0.24)',
+            text: options.textColor || '#93c5fd',
+            horizon: options.horizonColor || 'rgba(34, 197, 94, 0.72)',
+            cardinal: options.cardinalColor || '#e2e8f0',
+            sweep: options.sweepColor || 'rgba(34, 211, 238, 0.26)',
+            threat: options.threatColor || 'rgba(248, 113, 113, 0.5)'
         };
         
         // Data storage
         this.satellites = [];
         this.obstructions = [];
         this.horizonElevation = 10; // Minimum elevation for visibility
-        
+        this.trailHistory = new Map();
+        this.maxTrailPoints = 16;
+        this.trailMaxAgeMs = 3 * 60 * 1000;
+        this._cachedObstructionKey = null;
+        this._sortedObstructions = [];
+
         // Animation
         this.animationId = null;
         this.isAnimating = false;
+        this.sweepAngle = 0;
+        this.sweepAnimationId = null;
+        this.sweepActive = true;
+        this._lastSweepTick = 0;
+        this._visibilityHandler = () => {
+            if (document.hidden) {
+                this.stopSweep();
+            } else if (!this.sweepAnimationId) {
+                this.startSweep();
+            }
+        };
+        document.addEventListener('visibilitychange', this._visibilityHandler);
+        this.startSweep();
     }
     
     /**
@@ -130,7 +150,7 @@ class SkyPlot {
         
         ctx.strokeStyle = this.colors.grid;
         ctx.lineWidth = 1 * this.dpr;
-        ctx.setLineDash([]);
+        ctx.setLineDash([2 * this.dpr, 4 * this.dpr]);
         
         // Draw elevation circles (30°, 60°)
         [30, 60].forEach(elevation => {
@@ -141,7 +161,7 @@ class SkyPlot {
             
             // Label
             ctx.fillStyle = this.colors.text;
-            ctx.font = `${10 * this.dpr}px sans-serif`;
+            ctx.font = `${10 * this.dpr}px "JetBrains Mono", monospace`;
             ctx.textAlign = 'left';
             ctx.textBaseline = 'middle';
             ctx.fillText(`${elevation}°`, this.centerX + radius + 4 * this.dpr, this.centerY);
@@ -157,6 +177,7 @@ class SkyPlot {
         // Draw cardinal direction lines
         ctx.strokeStyle = this.colors.grid;
         ctx.lineWidth = 1 * this.dpr;
+        ctx.setLineDash([]);
         
         const directions = [
             { angle: 0, label: 'N' },
@@ -177,7 +198,7 @@ class SkyPlot {
             // Cardinal labels
             const labelPos = this.polarToCartesian(angle, -10);
             ctx.fillStyle = this.colors.cardinal;
-            ctx.font = `bold ${12 * this.dpr}px sans-serif`;
+            ctx.font = `bold ${12 * this.dpr}px "JetBrains Mono", monospace`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.fillText(label, labelPos.x, labelPos.y);
@@ -205,9 +226,12 @@ class SkyPlot {
         if (!this.obstructions || this.obstructions.length === 0) return;
         
         const ctx = this.ctx;
-        
-        // Sort obstructions by azimuth
-        const sorted = [...this.obstructions].sort((a, b) => a.azimuth - b.azimuth);
+        const key = JSON.stringify(this.obstructions.map((obs) => [obs.azimuth, obs.elevation]));
+        if (key !== this._cachedObstructionKey) {
+            this._cachedObstructionKey = key;
+            this._sortedObstructions = [...this.obstructions].sort((a, b) => a.azimuth - b.azimuth);
+        }
+        const sorted = this._sortedObstructions;
         
         // Create path for obstruction silhouette
         ctx.beginPath();
@@ -237,6 +261,111 @@ class SkyPlot {
         ctx.lineWidth = 2 * this.dpr;
         ctx.stroke();
     }
+
+    /**
+     * Draw pulsing threat-ring sectors where obstruction elevation is significant.
+     * @private
+     */
+    drawThreatRings() {
+        if (!this.obstructions || this.obstructions.length === 0) return;
+
+        const ctx = this.ctx;
+        const pulse = 0.35 + (Math.sin(Date.now() / 260) + 1) * 0.2;
+        let rendered = 0;
+        const maxThreatRings = 96;
+
+        this.obstructions.forEach((obs, index) => {
+            if (!Number.isFinite(obs.elevation) || obs.elevation < 20) return;
+            if (rendered >= maxThreatRings) return;
+            rendered += 1;
+
+            const outerRadius = (90 - Math.max(0, obs.elevation - 8)) / 90 * this.radius;
+            const innerRadius = (90 - Math.min(90, obs.elevation + 8)) / 90 * this.radius;
+            const start = (obs.azimuth - 5 - 90) * Math.PI / 180;
+            const end = (obs.azimuth + 5 - 90) * Math.PI / 180;
+
+            ctx.save();
+            ctx.fillStyle = `rgba(248, 113, 113, ${Math.min(0.58, pulse + 0.06)})`;
+            ctx.strokeStyle = this.colors.threat;
+            ctx.lineWidth = 1.5 * this.dpr;
+            ctx.setLineDash(index % 2 === 0 ? [2 * this.dpr, 3 * this.dpr] : [1 * this.dpr, 4 * this.dpr]);
+
+            ctx.beginPath();
+            ctx.arc(this.centerX, this.centerY, outerRadius, start, end);
+            ctx.arc(this.centerX, this.centerY, innerRadius, end, start, true);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+            ctx.restore();
+        });
+    }
+
+    /**
+     * Draw short projected trail arcs for visible satellites.
+     * @private
+     */
+    drawSatelliteTrails() {
+        if (!this.satellites || this.satellites.length === 0) return;
+
+        const ctx = this.ctx;
+        this.satellites.forEach((sat) => {
+            const key = sat.id || sat.name;
+            if (!key || !this.trailHistory.has(key)) return;
+            const trail = this.trailHistory.get(key);
+            if (!trail || trail.length < 2) return;
+
+            ctx.save();
+            ctx.strokeStyle = 'rgba(45, 212, 191, 0.35)';
+            ctx.lineWidth = 1.4 * this.dpr;
+            ctx.beginPath();
+
+            trail.forEach((point, idx) => {
+                const pos = this.polarToCartesian(point.azimuth, point.elevation);
+                if (idx === 0) ctx.moveTo(pos.x, pos.y);
+                else ctx.lineTo(pos.x, pos.y);
+            });
+
+            ctx.stroke();
+            ctx.restore();
+        });
+    }
+
+    /**
+     * Draw rotating radar sweep line.
+     * @private
+     */
+    drawRadarSweep() {
+        const ctx = this.ctx;
+        const sweepStart = (this.sweepAngle - 14 - 90) * Math.PI / 180;
+        const sweepEnd = (this.sweepAngle - 90) * Math.PI / 180;
+
+        ctx.save();
+        const grad = ctx.createRadialGradient(
+            this.centerX,
+            this.centerY,
+            0,
+            this.centerX,
+            this.centerY,
+            this.radius
+        );
+        grad.addColorStop(0, 'rgba(34, 211, 238, 0)');
+        grad.addColorStop(1, this.colors.sweep);
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(this.centerX, this.centerY);
+        ctx.arc(this.centerX, this.centerY, this.radius, sweepStart, sweepEnd);
+        ctx.closePath();
+        ctx.fill();
+
+        const end = this.polarToCartesian(this.sweepAngle, 0);
+        ctx.strokeStyle = 'rgba(34, 211, 238, 0.82)';
+        ctx.lineWidth = 2 * this.dpr;
+        ctx.beginPath();
+        ctx.moveTo(this.centerX, this.centerY);
+        ctx.lineTo(end.x, end.y);
+        ctx.stroke();
+        ctx.restore();
+    }
     
     /**
      * Draw satellites
@@ -261,13 +390,13 @@ class SkyPlot {
             if (isVisible) {
                 ctx.beginPath();
                 ctx.arc(pos.x, pos.y, 10 * this.dpr, 0, Math.PI * 2);
-                ctx.fillStyle = 'rgba(233, 69, 96, 0.3)';
+                ctx.fillStyle = 'rgba(45, 212, 191, 0.28)';
                 ctx.fill();
             }
             
             // Draw satellite ID label
             ctx.fillStyle = this.colors.text;
-            ctx.font = `${9 * this.dpr}px sans-serif`;
+            ctx.font = `${9 * this.dpr}px "JetBrains Mono", monospace`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'bottom';
             ctx.fillText(
@@ -297,8 +426,11 @@ class SkyPlot {
     draw() {
         this.clear();
         this.drawGrid();
+        this.drawThreatRings();
         this.drawObstructions();
+        this.drawSatelliteTrails();
         this.drawSatellites();
+        this.drawRadarSweep();
     }
     
     /**
@@ -313,6 +445,7 @@ class SkyPlot {
      */
     setSatellites(satellites) {
         this.satellites = satellites || [];
+        this._updateTrailHistory(this.satellites);
         this.draw();
     }
     
@@ -335,7 +468,39 @@ class SkyPlot {
     setData(satellites, obstructions) {
         this.satellites = satellites || [];
         this.obstructions = obstructions || [];
+        this._updateTrailHistory(this.satellites);
         this.draw();
+    }
+
+    /**
+     * Persist short history buffers for satellite trail rendering.
+     * @private
+     * @param {Array} satellites
+     */
+    _updateTrailHistory(satellites) {
+        const now = Date.now();
+        const activeKeys = new Set();
+
+        satellites.forEach((sat) => {
+            const key = sat.id || sat.name;
+            if (!key) return;
+            activeKeys.add(key);
+            const trail = this.trailHistory.get(key) || [];
+            trail.push({ azimuth: sat.azimuth, elevation: sat.elevation, ts: now });
+            const minTs = now - this.trailMaxAgeMs;
+            while (trail.length > 0 && trail[0].ts < minTs) {
+                trail.shift();
+            }
+            if (trail.length > this.maxTrailPoints) {
+                trail.splice(0, trail.length - this.maxTrailPoints);
+            }
+            this.trailHistory.set(key, trail);
+        });
+
+        // Keep memory bounded by removing stale satellites.
+        Array.from(this.trailHistory.keys()).forEach((key) => {
+            if (!activeKeys.has(key)) this.trailHistory.delete(key);
+        });
     }
     
     /**
@@ -348,6 +513,8 @@ class SkyPlot {
             this.stopAnimation();
         }
         
+        if (!Array.isArray(satelliteSequence) || satelliteSequence.length === 0) return;
+        if (!Number.isFinite(interval) || interval < 16) interval = 1000;
         let frameIndex = 0;
         this.isAnimating = true;
         
@@ -373,6 +540,42 @@ class SkyPlot {
         if (this.animationId) {
             clearTimeout(this.animationId);
             this.animationId = null;
+        }
+    }
+
+    /**
+     * Start the radar sweep animation loop.
+     */
+    startSweep() {
+        if (this.sweepAnimationId) return;
+        this.sweepActive = true;
+
+        const animate = (ts) => {
+            if (!this.sweepActive) {
+                this.sweepAnimationId = null;
+                return;
+            }
+
+            if (!this._lastSweepTick) this._lastSweepTick = ts;
+            const delta = ts - this._lastSweepTick;
+            this._lastSweepTick = ts;
+            this.sweepAngle = (this.sweepAngle + (delta * 0.045)) % 360;
+            this.draw();
+            this.sweepAnimationId = requestAnimationFrame(animate);
+        };
+
+        this.sweepAnimationId = requestAnimationFrame(animate);
+    }
+
+    /**
+     * Stop radar sweep animation.
+     */
+    stopSweep() {
+        this.sweepActive = false;
+        this._lastSweepTick = 0;
+        if (this.sweepAnimationId) {
+            cancelAnimationFrame(this.sweepAnimationId);
+            this.sweepAnimationId = null;
         }
     }
     
@@ -445,8 +648,11 @@ class SkyPlot {
      */
     destroy() {
         this.stopAnimation();
+        this.stopSweep();
+        document.removeEventListener('visibilitychange', this._visibilityHandler);
         this.satellites = [];
         this.obstructions = [];
+        this.trailHistory.clear();
         this.clear();
     }
 }

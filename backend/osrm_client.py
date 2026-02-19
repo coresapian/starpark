@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from typing import Optional
 
 import requests
@@ -16,15 +17,24 @@ OSRM_BASE_URL = "https://router.project-osrm.org"
 class OSRMClient:
     """Client for Open Source Routing Machine (OSRM) API."""
 
-    def __init__(self, base_url: str = OSRM_BASE_URL, timeout: float = 30.0):
+    def __init__(
+        self,
+        base_url: str = OSRM_BASE_URL,
+        timeout: float = 30.0,
+        max_retries: int = 2,
+        retry_backoff_s: float = 0.4,
+    ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.max_retries = max(1, int(max_retries))
+        self.retry_backoff_s = max(0.05, float(retry_backoff_s))
 
     def get_route(
         self,
         origin: tuple[float, float],
         destination: tuple[float, float],
         profile: str = "driving",
+        fallback_profiles: Optional[list[str]] = None,
     ) -> Optional[dict]:
         """Fetch route geometry and metadata from OSRM.
 
@@ -36,36 +46,66 @@ class OSRMClient:
         Returns:
             dict with keys geometry, distance_m, duration_s, or None on failure.
         """
-        # OSRM expects lon,lat ordering.
+        profiles = [profile]
+        defaults = fallback_profiles or ["driving", "walking", "cycling"]
+        for alt in defaults:
+            if alt not in profiles:
+                profiles.append(alt)
+
         coords = f"{origin[1]},{origin[0]};{destination[1]},{destination[0]}"
-        url = f"{self.base_url}/route/v1/{profile}/{coords}"
         params = {
             "overview": "full",
             "geometries": "geojson",
             "steps": "false",
         }
+        last_error: Optional[str] = None
 
-        try:
-            resp = requests.get(url, params=params, timeout=self.timeout)
-            resp.raise_for_status()
-            data = resp.json()
+        for current_profile in profiles:
+            url = f"{self.base_url}/route/v1/{current_profile}/{coords}"
+            for attempt in range(1, self.max_retries + 1):
+                try:
+                    resp = requests.get(url, params=params, timeout=self.timeout)
+                    if resp.status_code in (429, 500, 502, 503, 504):
+                        raise requests.RequestException(
+                            f"transient OSRM status {resp.status_code}"
+                        )
+                    resp.raise_for_status()
+                    data = resp.json()
 
-            if data.get("code") != "Ok" or not data.get("routes"):
-                logger.warning("OSRM returned no routes: %s", data.get("code"))
-                return None
+                    if data.get("code") != "Ok" or not data.get("routes"):
+                        last_error = str(data.get("code", "no_route"))
+                        logger.warning(
+                            "OSRM returned no route for profile %s: %s",
+                            current_profile,
+                            last_error,
+                        )
+                        break
 
-            route = data["routes"][0]
-            geometry = [
-                (coord[1], coord[0]) for coord in route["geometry"]["coordinates"]
-            ]
-            return {
-                "geometry": geometry,
-                "distance_m": float(route["distance"]),
-                "duration_s": float(route["duration"]),
-            }
-        except requests.RequestException as e:
-            logger.error("OSRM request failed: %s", str(e))
-            return None
+                    route = data["routes"][0]
+                    geometry = [
+                        (coord[1], coord[0]) for coord in route["geometry"]["coordinates"]
+                    ]
+                    return {
+                        "geometry": geometry,
+                        "distance_m": float(route["distance"]),
+                        "duration_s": float(route["duration"]),
+                        "profile": current_profile,
+                    }
+                except requests.RequestException as e:
+                    last_error = str(e)
+                    if attempt < self.max_retries:
+                        backoff = self.retry_backoff_s * (2 ** (attempt - 1))
+                        time.sleep(backoff)
+                    else:
+                        logger.warning(
+                            "OSRM request failed for profile %s after %d attempts: %s",
+                            current_profile,
+                            self.max_retries,
+                            e,
+                        )
+
+        logger.error("OSRM request exhausted all profiles (%s): %s", ",".join(profiles), last_error)
+        return None
 
     def sample_route_points(
         self,

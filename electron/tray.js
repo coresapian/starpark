@@ -24,6 +24,7 @@ function createTray({ onShow, onPreferences, getMainWindow }) {
     icon = nativeImage.createFromPath(iconPath);
     if (icon.isEmpty()) throw new Error('empty');
   } catch {
+    // TODO: Add a bundled monochrome fallback SVG and explicit size variant when native template loading fails.
     // Create a 16x16 template icon programmatically
     icon = nativeImage.createEmpty();
   }
@@ -71,6 +72,7 @@ function createTray({ onShow, onPreferences, getMainWindow }) {
 
   tray.setContextMenu(contextMenu);
 
+  // TODO: Update tray context menu state (enabled/disabled actions) based on backend health channel updates.
   tray.on('click', () => onShow());
 }
 

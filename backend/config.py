@@ -9,7 +9,7 @@
 from functools import lru_cache
 from typing import Optional
 
-from pydantic import Field, PostgresDsn, RedisDsn, field_validator
+from pydantic import Field, PostgresDsn, RedisDsn, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -63,11 +63,14 @@ class Settings(BaseSettings):
     
     # CORS
     cors_origins: list[str] = Field(
-        default=["*"],
+        default=["http://localhost:3000", "http://localhost:5173", "app://linkspot"],
         description="Allowed CORS origins",
     )
     cors_allow_credentials: bool = Field(default=True, description="Allow credentials in CORS")
-    cors_allow_methods: list[str] = Field(default=["*"], description="Allowed HTTP methods")
+    cors_allow_methods: list[str] = Field(
+        default=["GET", "POST", "OPTIONS"],
+        description="Allowed HTTP methods",
+    )
     cors_allow_headers: list[str] = Field(default=["*"], description="Allowed HTTP headers")
     
     # Rate Limiting
@@ -148,6 +151,11 @@ class Settings(BaseSettings):
         default=30.0,
         description="Request timeout in seconds",
     )
+    analyze_timeout_seconds: float = Field(default=20.0, description="Analyze endpoint timeout budget")
+    heatmap_timeout_seconds: float = Field(default=45.0, description="Heatmap endpoint timeout budget")
+    route_timeout_seconds: float = Field(default=90.0, description="Route planning timeout budget")
+    satellite_timeout_seconds: float = Field(default=15.0, description="Satellite endpoint timeout budget")
+    health_timeout_seconds: float = Field(default=5.0, description="Health probe timeout budget")
     max_concurrent_requests: int = Field(
         default=100,
         description="Maximum concurrent requests",
@@ -166,8 +174,12 @@ class Settings(BaseSettings):
     def parse_cors_methods(cls, v: str | list[str]) -> list[str]:
         """Parse CORS methods from string or list."""
         if isinstance(v, str):
-            return [method.strip() for method in v.split(",")]
-        return v
+            methods = [method.strip().upper() for method in v.split(",") if method.strip()]
+        else:
+            methods = [str(method).strip().upper() for method in v if str(method).strip()]
+        if "*" in methods:
+            return ["GET", "POST", "OPTIONS"]
+        return sorted(set(methods))
     
     @field_validator("cors_allow_headers", mode="before")
     @classmethod
@@ -185,6 +197,18 @@ class Settings(BaseSettings):
         if v.lower() not in allowed:
             raise ValueError(f"environment must be one of {allowed}")
         return v.lower()
+
+    @model_validator(mode="after")
+    def validate_cors_profile(self) -> "Settings":
+        """Enforce safer CORS defaults by environment profile."""
+        if self.environment == "production":
+            if not self.cors_origins:
+                raise ValueError("cors_origins cannot be empty in production")
+            if "*" in self.cors_origins:
+                raise ValueError("Wildcard CORS origins are not allowed in production")
+            if "*" in self.cors_allow_methods:
+                raise ValueError("Wildcard CORS methods are not allowed in production")
+        return self
     
     @field_validator("log_level")
     @classmethod
@@ -203,6 +227,7 @@ def get_settings() -> Settings:
     Returns:
         Settings: Application settings singleton.
     """
+    # TODO: Pull secrets from a managed secret store in production instead of plain environment defaults.
     return Settings()
 
 

@@ -5,22 +5,20 @@
 
 """Health check API endpoints for LinkSpot."""
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
 
-import redis.asyncio as aioredis
 import asyncpg
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 
 from config import settings
 from dependencies import (
     get_data_pipeline,
-    get_db,
     get_db_pool,
     get_obstruction_engine,
-    get_redis,
     get_redis_pool,
     get_satellite_engine,
 )
@@ -40,13 +38,14 @@ router = APIRouter(prefix="/api/v1/health", tags=["Health"])
 
 # Track application start time for uptime calculation
 _app_start_time: float = time.time()
+_readiness_cache: dict[str, Any] = {"checked_at": 0.0, "ready": False}
 
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
 
-async def _check_redis_health(redis: aioredis.Redis) -> ComponentHealth:
+async def _check_redis_health(redis: Any) -> ComponentHealth:
     """Check Redis health status.
     
     Args:
@@ -57,7 +56,9 @@ async def _check_redis_health(redis: aioredis.Redis) -> ComponentHealth:
     """
     start_time = time.time()
     try:
-        await redis.ping()
+        ping_result = await redis.ping()
+        if ping_result is not True:
+            raise RuntimeError("redis_unavailable")
         latency_ms = (time.time() - start_time) * 1000
         return ComponentHealth(
             name="redis",
@@ -67,6 +68,7 @@ async def _check_redis_health(redis: aioredis.Redis) -> ComponentHealth:
         )
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
+        # TODO: Add Redis command-specific probes (info/mem) to detect auth vs connectivity degradations.
         return ComponentHealth(
             name="redis",
             status=ComponentStatus.UNHEALTHY,
@@ -100,6 +102,7 @@ async def _check_database_health(db: asyncpg.Connection) -> ComponentHealth:
             raise Exception("Unexpected query result")
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
+        # TODO: Capture DB error class (timeout/permission/schema) separately for targeted remediation.
         return ComponentHealth(
             name="database",
             status=ComponentStatus.UNHEALTHY,
@@ -124,6 +127,7 @@ async def _check_satellite_engine_health(
     try:
         # Try to get constellations as a simple health check
         constellations = await satellite_engine.get_constellations()
+        # TODO: Bound constellation probe time since this call can become expensive with full refreshs.
         latency_ms = (time.time() - start_time) * 1000
         return ComponentHealth(
             name="satellite_engine",
@@ -167,6 +171,7 @@ async def _check_data_pipeline_health(data_pipeline: Any) -> ComponentHealth:
             # Try to initialize
             if hasattr(data_pipeline, 'initialize'):
                 await data_pipeline.initialize()
+            # TODO: Avoid initializing heavy pipeline from health checks; use a lightweight readiness flag instead.
             latency_ms = (time.time() - start_time) * 1000
             return ComponentHealth(
                 name="data_pipeline",
@@ -236,6 +241,7 @@ def _calculate_overall_status(components: list[ComponentHealth]) -> ComponentSta
         return ComponentStatus.DEGRADED
     elif all(s == ComponentStatus.HEALTHY for s in statuses):
         return ComponentStatus.HEALTHY
+    # TODO: Add UNKNOWN/MAINTENANCE handling when health checks are partially timed out.
     
     return ComponentStatus.UNKNOWN
 
@@ -320,62 +326,69 @@ async def health_check(request: Request) -> HealthResponse:
 )
 async def detailed_health_check(
     request: Request,
-    redis: aioredis.Redis = Depends(get_redis),
-    db: asyncpg.Connection = Depends(get_db),
-    satellite_engine: Any = Depends(get_satellite_engine),
-    data_pipeline: Any = Depends(get_data_pipeline),
-    obstruction_engine: Any = Depends(get_obstruction_engine),
 ) -> DetailedHealthResponse:
     """Detailed health check endpoint.
     
     Args:
         request: FastAPI request object.
-        redis: Redis connection.
-        db: Database connection.
-        satellite_engine: Satellite engine instance.
-        data_pipeline: Data pipeline instance.
-        obstruction_engine: Obstruction engine instance.
         
     Returns:
         DetailedHealthResponse: Detailed health status.
     """
     logger.info("Performing detailed health check")
     
-    # Check all components
-    components = []
-    
-    # Check Redis
+    async def _run_probe(name: str, probe_coro: Any) -> ComponentHealth:
+        try:
+            return await asyncio.wait_for(probe_coro, timeout=settings.health_timeout_seconds)
+        except asyncio.TimeoutError:
+            return ComponentHealth(
+                name=name,
+                status=ComponentStatus.DEGRADED,
+                message="probe_timeout",
+                last_check=datetime.now(timezone.utc),
+            )
+        except Exception as e:
+            return ComponentHealth(
+                name=name,
+                status=ComponentStatus.UNHEALTHY,
+                message=str(e),
+                last_check=datetime.now(timezone.utc),
+            )
+
+    components: list[ComponentHealth] = []
+
     try:
-        redis_health = await _check_redis_health(redis)
-        components.append(redis_health)
+        redis = await get_redis_pool()
+        components.append(await _run_probe("redis", _check_redis_health(redis)))
     except Exception as e:
         components.append(
             ComponentHealth(
                 name="redis",
                 status=ComponentStatus.UNHEALTHY,
-                message=f"Connection error: {str(e)}",
+                message=str(e),
                 last_check=datetime.now(timezone.utc),
             )
         )
-    
-    # Check Database
+
     try:
-        db_health = await _check_database_health(db)
-        components.append(db_health)
+        db_pool = await get_db_pool()
+        async with db_pool.acquire() as db:
+            components.append(await _run_probe("database", _check_database_health(db)))
     except Exception as e:
         components.append(
             ComponentHealth(
                 name="database",
                 status=ComponentStatus.UNHEALTHY,
-                message=f"Connection error: {str(e)}",
+                message=str(e),
                 last_check=datetime.now(timezone.utc),
             )
         )
-    
-    # Check Satellite Engine
+
     try:
-        satellite_health = await _check_satellite_engine_health(satellite_engine)
-        components.append(satellite_health)
+        satellite_engine = await get_satellite_engine()
+        components.append(
+            await _run_probe("satellite_engine", _check_satellite_engine_health(satellite_engine))
+        )
     except Exception as e:
         components.append(
             ComponentHealth(
@@ -385,11 +398,10 @@ async def detailed_health_check(
                 last_check=datetime.now(timezone.utc),
             )
         )
-    
-    # Check Data Pipeline
+
     try:
-        pipeline_health = await _check_data_pipeline_health(data_pipeline)
-        components.append(pipeline_health)
+        data_pipeline = await get_data_pipeline()
+        components.append(await _run_probe("data_pipeline", _check_data_pipeline_health(data_pipeline)))
     except Exception as e:
         components.append(
             ComponentHealth(
@@ -399,11 +411,11 @@ async def detailed_health_check(
                 last_check=datetime.now(timezone.utc),
             )
         )
-    
-    # Check Obstruction Engine
+
+    # Obstruction check is CPU-local and cheap; run inline.
     try:
-        obstruction_health = _check_obstruction_engine_health(obstruction_engine)
-        components.append(obstruction_health)
+        obstruction_engine = await get_obstruction_engine()
+        components.append(_check_obstruction_engine_health(obstruction_engine))
     except Exception as e:
         components.append(
             ComponentHealth(
@@ -458,17 +470,11 @@ async def detailed_health_check(
 )
 async def readiness_check(
     request: Request,
-    redis: aioredis.Redis = Depends(get_redis),
-    db: asyncpg.Connection = Depends(get_db),
-    satellite_engine: Any = Depends(get_satellite_engine),
 ) -> HealthResponse:
     """Readiness check endpoint for Kubernetes probes.
     
     Args:
         request: FastAPI request object.
-        redis: Redis connection.
-        db: Database connection.
-        satellite_engine: Satellite engine instance.
         
     Returns:
         HealthResponse: Readiness status.
@@ -479,15 +485,34 @@ async def readiness_check(
     from fastapi import HTTPException, status
     
     try:
-        # Check Redis
-        await redis.ping()
-        
-        # Check Database
-        await db.fetchval("SELECT 1")
-        
-        # Check Satellite Engine
-        await satellite_engine.get_constellations()
-        
+        now = time.time()
+        if (now - float(_readiness_cache["checked_at"])) < 5.0:
+            if _readiness_cache["ready"]:
+                uptime = time.time() - _app_start_time
+                return HealthResponse(
+                    status=ComponentStatus.HEALTHY,
+                    version=settings.app_version,
+                    timestamp=datetime.now(timezone.utc),
+                    uptime_seconds=round(uptime, 2),
+                )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Service not ready (cached probe)",
+            )
+
+        redis = await get_redis_pool()
+        db_pool = await get_db_pool()
+        async with db_pool.acquire() as db:
+            await asyncio.wait_for(redis.ping(), timeout=settings.health_timeout_seconds)
+            await asyncio.wait_for(db.fetchval("SELECT 1"), timeout=settings.health_timeout_seconds)
+        satellite_engine = await get_satellite_engine()
+        await asyncio.wait_for(
+            satellite_engine.get_constellations(),
+            timeout=settings.health_timeout_seconds,
+        )
+
+        _readiness_cache["checked_at"] = now
+        _readiness_cache["ready"] = True
         uptime = time.time() - _app_start_time
         
         return HealthResponse(
@@ -498,6 +523,8 @@ async def readiness_check(
         )
         
     except Exception as e:
+        _readiness_cache["checked_at"] = time.time()
+        _readiness_cache["ready"] = False
         logger.warning(f"Readiness check failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
