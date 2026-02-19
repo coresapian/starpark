@@ -4,9 +4,9 @@
  * @version 1.0.0
  */
 
-const CACHE_NAME = 'linkspot-v2';
-const STATIC_CACHE = 'linkspot-static-v2';
-const API_CACHE = 'linkspot-api-v2';
+const CACHE_NAME = 'linkspot-v3';
+const STATIC_CACHE = 'linkspot-static-v3';
+const API_CACHE = 'linkspot-api-v3';
 
 // Static assets to cache on install
 const STATIC_ASSETS = [
@@ -25,6 +25,7 @@ const STATIC_ASSETS = [
 const API_ROUTES = [
     '/api/v1/analyze',
     '/api/v1/heatmap',
+    '/api/v1/route/',
     '/api/v1/satellites',
     '/api/v1/health'
 ];
@@ -136,17 +137,23 @@ async function networkFirstStrategy(request) {
     try {
         const networkResponse = await fetch(request);
         
-        if (networkResponse.ok) {
+        if (request.method === 'GET' && networkResponse.ok) {
             // Cache successful API responses
-            const cache = await caches.open(API_CACHE);
-            cache.put(request, networkResponse.clone());
+            try {
+                const cache = await caches.open(API_CACHE);
+                await cache.put(request, networkResponse.clone());
+            } catch (cacheError) {
+                console.warn('[SW] API cache write skipped:', cacheError);
+            }
         }
         
         return networkResponse;
     } catch (error) {
         console.log('[SW] Network failed, trying cache:', request.url);
         
-        const cachedResponse = await caches.match(request);
+        const cachedResponse = request.method === 'GET'
+            ? await caches.match(request)
+            : null;
         
         if (cachedResponse) {
             // Add header to indicate cached response

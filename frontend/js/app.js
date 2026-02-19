@@ -25,6 +25,7 @@ class LinkSpotApp {
             gridResolution: options.gridResolution || 50,
             heatMapRadius: options.heatMapRadius || 500,
             routeSampleInterval: options.routeSampleInterval || 500,
+            autoClearRouteOnDestinationChange: options.autoClearRouteOnDestinationChange ?? true,
             timeSliderStep: 15, // minutes
             animationInterval: 500 // ms between frames
         };
@@ -33,6 +34,7 @@ class LinkSpotApp {
         this.state = {
             map: null,
             currentPosition: null,
+            routeOrigin: null,
             currentTimestamp: null,
             isPlaying: false,
             isLoading: false,
@@ -77,6 +79,7 @@ class LinkSpotApp {
         
         // Cache DOM elements
         this.cacheElements();
+        this.initializeRouteAutoClearPreference();
         
         // Initialize map
         this.initMap();
@@ -143,6 +146,7 @@ class LinkSpotApp {
             routeSummaryDeadZone: document.getElementById('route-summary-deadzone'),
             routeSummaryWaypoints: document.getElementById('route-summary-waypoints'),
             routeSummaryClear: document.getElementById('route-summary-clear'),
+            routeAutoClearToggle: document.getElementById('route-auto-clear-toggle'),
             timeSlider: document.getElementById('time-slider'),
             currentTime: document.getElementById('current-time'),
             playBtn: document.getElementById('play-btn'),
@@ -281,9 +285,24 @@ class LinkSpotApp {
             });
         }
 
+        if (this.elements.routeAutoClearToggle) {
+            this.elements.routeAutoClearToggle.addEventListener('change', () => {
+                try {
+                    localStorage.setItem(
+                        'linkspot.route.autoClearOnDestinationChange',
+                        this.elements.routeAutoClearToggle.checked ? '1' : '0'
+                    );
+                } catch (_error) {
+                    // Local storage may be unavailable.
+                }
+            });
+        }
+
         // Scan area button
         this.elements.scanAreaBtn.addEventListener('click', () => {
             const center = this.state.map.getCenter();
+            // "Scan this area" is an explicit origin change for future route plans.
+            this.state.routeOrigin = { lat: center.lat, lon: center.lng };
             this.elements.scanAreaBtn.classList.add('hidden');
             this.loadHeatMap(center.lat, center.lng);
         });
@@ -461,7 +480,7 @@ class LinkSpotApp {
      */
     updateRoutePlanButtonState() {
         if (!this.elements.routePlanBtn) return;
-        const hasOrigin = !!this.state.currentPosition;
+        const hasOrigin = !!(this.state.routeOrigin || this.state.currentPosition);
         const hasDestinationText = this.elements.searchInput.value.trim().length > 1;
         this.elements.routePlanBtn.classList.toggle('hidden', !(hasOrigin && hasDestinationText));
     }
@@ -489,6 +508,35 @@ class LinkSpotApp {
             this.state.deadZoneLayer = null;
         }
         this.state.routePlan = null;
+    }
+
+    /**
+     * Initialize auto-clear toggle from persisted preference.
+     */
+    initializeRouteAutoClearPreference() {
+        if (!this.elements.routeAutoClearToggle) return;
+
+        let enabled = !!this.config.autoClearRouteOnDestinationChange;
+        try {
+            const saved = localStorage.getItem('linkspot.route.autoClearOnDestinationChange');
+            if (saved === '1') enabled = true;
+            if (saved === '0') enabled = false;
+        } catch (_error) {
+            // Local storage may be unavailable.
+        }
+
+        this.elements.routeAutoClearToggle.checked = enabled;
+    }
+
+    /**
+     * Whether route overlays should auto-clear on new destination selection.
+     * @returns {boolean}
+     */
+    shouldAutoClearRouteOnNewSelection() {
+        if (!this.elements.routeAutoClearToggle) {
+            return !!this.config.autoClearRouteOnDestinationChange;
+        }
+        return !!this.elements.routeAutoClearToggle.checked;
     }
 
     /**
@@ -555,7 +603,8 @@ class LinkSpotApp {
             return;
         }
 
-        const origin = this.state.currentPosition
+        const origin = this.state.routeOrigin
+            || this.state.currentPosition
             || (this.state.map ? this.state.map.getCenter() : null);
         if (!origin) {
             this.showToast('Set your origin first (GPS or map position)', 'warning');
@@ -914,12 +963,37 @@ class LinkSpotApp {
      * @param {string} name - Location name
      */
     selectSearchResult(lat, lon, name) {
+        if (this.state.routePlan) {
+            if (this.shouldAutoClearRouteOnNewSelection()) {
+                this.clearRoutePlan();
+            } else {
+                this.showToast(
+                    'Existing route kept. Click Plan Route to update.',
+                    'info',
+                    2600
+                );
+            }
+        }
+
         // Update search input
         this.elements.searchInput.value = name;
         this.hideSearchResults();
         
+        const previousCenter = this.state.map.getCenter();
+        // Preserve previously established origin context when selecting destinations.
+        if (!this.state.routeOrigin) {
+            const prior = this.state.currentPosition || previousCenter;
+            if (prior) {
+                this.state.routeOrigin = {
+                    lat: prior.lat,
+                    lon: prior.lon ?? prior.lng
+                };
+            }
+        }
+
         // Center map
         this.state.map.setView([lat, lon], 17);
+
         this.state.currentPosition = { lat, lon };
         this.updateRoutePlanButtonState();
         
@@ -1015,6 +1089,7 @@ class LinkSpotApp {
             // Center map
             this.state.map.setView([latitude, longitude], 17);
             this.state.currentPosition = { lat: latitude, lon: longitude };
+            this.state.routeOrigin = { lat: latitude, lon: longitude };
             this.updateRoutePlanButtonState();
             
             // Add marker
