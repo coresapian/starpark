@@ -15,38 +15,40 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables.
-    
+
     All settings can be overridden via environment variables.
     Uses .env file for local development.
     """
-    
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
     )
-    
+
     # Application
     app_name: str = Field(default="LinkSpot API", description="Application name")
     app_version: str = Field(default="1.0.0", description="Application version")
     debug: bool = Field(default=False, description="Debug mode")
     environment: str = Field(default="production", description="Deployment environment")
-    
+
     # Server
     host: str = Field(default="0.0.0.0", description="Server bind host")
     port: int = Field(default=8000, description="Server port")
     workers: int = Field(default=1, description="Number of worker processes")
-    
+
     # Database
     database_url: PostgresDsn = Field(
         default="postgresql://linkspot:linkspot@localhost:5432/linkspot",
         description="PostgreSQL connection URL",
     )
     database_pool_size: int = Field(default=10, description="DB connection pool size")
-    database_max_overflow: int = Field(default=20, description="DB max overflow connections")
+    database_max_overflow: int = Field(
+        default=20, description="DB max overflow connections"
+    )
     database_echo: bool = Field(default=False, description="Echo SQL queries")
-    
+
     # Redis
     redis_url: RedisDsn = Field(
         default="redis://localhost:6379/0",
@@ -54,30 +56,42 @@ class Settings(BaseSettings):
     )
     redis_pool_size: int = Field(default=10, description="Redis connection pool size")
     redis_socket_timeout: float = Field(default=5.0, description="Redis socket timeout")
-    redis_socket_connect_timeout: float = Field(default=5.0, description="Redis connect timeout")
-    cache_ttl_seconds: int = Field(default=300, description="Default cache TTL in seconds")
-    
+    redis_socket_connect_timeout: float = Field(
+        default=5.0, description="Redis connect timeout"
+    )
+    cache_ttl_seconds: int = Field(
+        default=300, description="Default cache TTL in seconds"
+    )
+
     # API Keys
     api_key_header: str = Field(default="X-API-Key", description="API key header name")
-    api_key: Optional[str] = Field(default=None, description="Optional API key for protected endpoints")
-    
+    api_key: Optional[str] = Field(
+        default=None, description="Optional API key for protected endpoints"
+    )
+
     # CORS
     cors_origins: list[str] = Field(
         default=["http://localhost:3000", "http://localhost:5173", "app://linkspot"],
         description="Allowed CORS origins",
     )
-    cors_allow_credentials: bool = Field(default=True, description="Allow credentials in CORS")
+    cors_allow_credentials: bool = Field(
+        default=True, description="Allow credentials in CORS"
+    )
     cors_allow_methods: list[str] = Field(
         default=["GET", "POST", "OPTIONS"],
         description="Allowed HTTP methods",
     )
-    cors_allow_headers: list[str] = Field(default=["*"], description="Allowed HTTP headers")
-    
+    cors_allow_headers: list[str] = Field(
+        default=["*"], description="Allowed HTTP headers"
+    )
+
     # Rate Limiting
     rate_limit_requests: int = Field(default=100, description="Requests per window")
-    rate_limit_window_seconds: int = Field(default=60, description="Rate limit window in seconds")
+    rate_limit_window_seconds: int = Field(
+        default=60, description="Rate limit window in seconds"
+    )
     rate_limit_enabled: bool = Field(default=True, description="Enable rate limiting")
-    
+
     # Satellite Engine
     elevation_mask_degrees: float = Field(
         default=10.0,
@@ -91,7 +105,7 @@ class Settings(BaseSettings):
         default=1000,
         description="Maximum satellites to return per query",
     )
-    
+
     # Obstruction Engine
     ray_casting_resolution: int = Field(
         default=360,
@@ -105,7 +119,7 @@ class Settings(BaseSettings):
         default=100.0,
         description="Distance between terrain samples",
     )
-    
+
     # Heatmap Generation
     heatmap_max_radius_meters: int = Field(
         default=10000,
@@ -123,7 +137,30 @@ class Settings(BaseSettings):
         default=10000,
         description="Maximum number of points in a heatmap",
     )
-    
+    heatmap_road_mask_buffer_meters: float = Field(
+        default=18.0,
+        gt=0.0,
+        description="Road proximity buffer for driveable heatmap masking in meters",
+    )
+    heatmap_parking_mask_buffer_meters: float = Field(
+        default=35.0,
+        gt=0.0,
+        description="Parking proximity buffer for driveable heatmap masking in meters",
+    )
+
+    # Route Recommendation Filters
+    route_candidate_corridor_meters: float = Field(
+        default=120.0,
+        gt=0.0,
+        description="Maximum route-corridor offset for amenity waypoint candidates",
+    )
+    route_waypoint_min_reliability_pct: float = Field(
+        default=50.0,
+        ge=0.0,
+        le=100.0,
+        description="Minimum time-window reliability percent for waypoint eligibility",
+    )
+
     # Zone Classification
     zone_excellent_threshold: float = Field(
         default=0.9,
@@ -137,7 +174,7 @@ class Settings(BaseSettings):
         default=0.4,
         description="Minimum clear ratio for fair zone",
     )
-    
+
     # Logging
     log_level: str = Field(default="INFO", description="Logging level")
     log_format: str = Field(
@@ -145,22 +182,32 @@ class Settings(BaseSettings):
         description="Log format: json or text",
     )
     log_request_body: bool = Field(default=False, description="Log request bodies")
-    
+
     # Performance
     request_timeout_seconds: float = Field(
         default=30.0,
         description="Request timeout in seconds",
     )
-    analyze_timeout_seconds: float = Field(default=20.0, description="Analyze endpoint timeout budget")
-    heatmap_timeout_seconds: float = Field(default=45.0, description="Heatmap endpoint timeout budget")
-    route_timeout_seconds: float = Field(default=90.0, description="Route planning timeout budget")
-    satellite_timeout_seconds: float = Field(default=15.0, description="Satellite endpoint timeout budget")
-    health_timeout_seconds: float = Field(default=5.0, description="Health probe timeout budget")
+    analyze_timeout_seconds: float = Field(
+        default=20.0, description="Analyze endpoint timeout budget"
+    )
+    heatmap_timeout_seconds: float = Field(
+        default=45.0, description="Heatmap endpoint timeout budget"
+    )
+    route_timeout_seconds: float = Field(
+        default=90.0, description="Route planning timeout budget"
+    )
+    satellite_timeout_seconds: float = Field(
+        default=15.0, description="Satellite endpoint timeout budget"
+    )
+    health_timeout_seconds: float = Field(
+        default=5.0, description="Health probe timeout budget"
+    )
     max_concurrent_requests: int = Field(
         default=100,
         description="Maximum concurrent requests",
     )
-    
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, v: str | list[str]) -> list[str]:
@@ -168,19 +215,23 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",")]
         return v
-    
+
     @field_validator("cors_allow_methods", mode="before")
     @classmethod
     def parse_cors_methods(cls, v: str | list[str]) -> list[str]:
         """Parse CORS methods from string or list."""
         if isinstance(v, str):
-            methods = [method.strip().upper() for method in v.split(",") if method.strip()]
+            methods = [
+                method.strip().upper() for method in v.split(",") if method.strip()
+            ]
         else:
-            methods = [str(method).strip().upper() for method in v if str(method).strip()]
+            methods = [
+                str(method).strip().upper() for method in v if str(method).strip()
+            ]
         if "*" in methods:
             return ["GET", "POST", "OPTIONS"]
         return sorted(set(methods))
-    
+
     @field_validator("cors_allow_headers", mode="before")
     @classmethod
     def parse_cors_headers(cls, v: str | list[str]) -> list[str]:
@@ -188,7 +239,7 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [header.strip() for header in v.split(",")]
         return v
-    
+
     @field_validator("environment")
     @classmethod
     def validate_environment(cls, v: str) -> str:
@@ -209,7 +260,7 @@ class Settings(BaseSettings):
             if "*" in self.cors_allow_methods:
                 raise ValueError("Wildcard CORS methods are not allowed in production")
         return self
-    
+
     @field_validator("log_level")
     @classmethod
     def validate_log_level(cls, v: str) -> str:
@@ -223,7 +274,7 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     """Get cached settings instance.
-    
+
     Returns:
         Settings: Application settings singleton.
     """

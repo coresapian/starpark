@@ -8,6 +8,7 @@
 
 import asyncio
 import logging
+import math
 import random
 import time
 from contextlib import asynccontextmanager
@@ -86,17 +87,18 @@ class _NoopSyncRedis:
 # Redis Dependency
 # ============================================================================
 
+
 async def get_redis_pool() -> Any:
     """Get or create Redis connection pool.
-    
+
     Returns:
         aioredis.Redis: Redis client instance.
-        
+
     Raises:
         HTTPException: If Redis connection fails.
     """
     global _redis_pool
-    
+
     if _redis_pool is None:
         if aioredis is None:
             logger.warning("redis package not installed; using degraded noop cache")
@@ -117,7 +119,7 @@ async def get_redis_pool() -> Any:
             except Exception as e:
                 logger.warning("Redis unavailable; using degraded noop cache: %s", e)
                 _redis_pool = _NoopRedis()
-    
+
     return _redis_pool
 
 
@@ -134,7 +136,7 @@ async def get_redis() -> AsyncGenerator[Any, None]:
         logger.error(f"Redis operation failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Cache operation failed"
+            detail="Cache operation failed",
         )
 
 
@@ -142,17 +144,18 @@ async def get_redis() -> AsyncGenerator[Any, None]:
 # Database Dependency
 # ============================================================================
 
+
 async def get_db_pool() -> asyncpg.Pool:
     """Get or create PostgreSQL connection pool.
-    
+
     Returns:
         asyncpg.Pool: Database connection pool.
-        
+
     Raises:
         HTTPException: If database connection fails.
     """
     global _db_pool
-    
+
     if _db_pool is None:
         attempts = 3
         base_backoff = 0.3
@@ -174,20 +177,24 @@ async def get_db_pool() -> asyncpg.Pool:
                 logger.info("Database connection pool initialized")
                 break
             except Exception as e:
-                logger.warning("DB pool init attempt %d/%d failed: %s", attempt, attempts, e)
+                logger.warning(
+                    "DB pool init attempt %d/%d failed: %s", attempt, attempts, e
+                )
                 if attempt == attempts:
                     raise HTTPException(
                         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                         detail="Database service unavailable",
                     ) from e
-                await asyncio.sleep(base_backoff * (2 ** (attempt - 1)) + random.uniform(0.0, 0.15))
-    
+                await asyncio.sleep(
+                    base_backoff * (2 ** (attempt - 1)) + random.uniform(0.0, 0.15)
+                )
+
     return _db_pool
 
 
 async def get_db() -> AsyncGenerator[asyncpg.Connection, None]:
     """FastAPI dependency for database connection.
-    
+
     Yields:
         asyncpg.Connection: Database connection for request scope.
     """
@@ -199,14 +206,14 @@ async def get_db() -> AsyncGenerator[asyncpg.Connection, None]:
             logger.error(f"Database query failed: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Database query failed"
+                detail="Database query failed",
             )
 
 
 @asynccontextmanager
 async def get_db_transaction() -> AsyncGenerator[asyncpg.Connection, None]:
     """Context manager for database transactions.
-    
+
     Usage:
         async with get_db_transaction() as conn:
             result = await conn.fetch("SELECT ...")
@@ -221,6 +228,7 @@ async def get_db_transaction() -> AsyncGenerator[asyncpg.Connection, None]:
 # Satellite Engine Dependency
 # ============================================================================
 
+
 async def get_satellite_engine() -> Any:
     """Get or initialize satellite engine singleton.
 
@@ -234,7 +242,9 @@ async def get_satellite_engine() -> Any:
             _satellite_engine = _SatelliteEngineAdapter(sync_redis)
             logger.info("Satellite engine initialized (real — CelesTrak/Skyfield)")
         except Exception as e:
-            logger.warning("Satellite engine unavailable; using degraded fallback: %s", e)
+            logger.warning(
+                "Satellite engine unavailable; using degraded fallback: %s", e
+            )
             _satellite_engine = _FallbackSatelliteEngine(reason=str(e))
 
     return _satellite_engine
@@ -265,6 +275,7 @@ class _SatelliteEngineAdapter:
 
     def __init__(self, sync_redis):
         from satellite_engine import SatelliteEngine
+
         self._engine = SatelliteEngine(sync_redis)
         self._engine.fetch_tle_data()
         logger.info(f"Loaded {len(self._engine._satellites)} satellites from TLE data")
@@ -279,9 +290,13 @@ class _SatelliteEngineAdapter:
     ) -> list[dict]:
         # TODO: Add input range validation and request cancellation handling for long satellite solves.
         import asyncio
+
         positions = await asyncio.to_thread(
             self._engine.get_satellite_positions,
-            lat, lon, elevation, timestamp,
+            lat,
+            lon,
+            elevation,
+            timestamp,
         )
         return [
             {
@@ -323,6 +338,7 @@ class _FallbackSatelliteEngine:
 # Data Pipeline Dependency
 # ============================================================================
 
+
 async def get_data_pipeline() -> Any:
     """Get or initialize data pipeline singleton.
 
@@ -348,6 +364,7 @@ class _DataPipelineAdapter:
 
     def __init__(self, sync_redis, postgis_conn=None):
         from data_pipeline import LinkSpotDataPipeline
+
         self._pipeline = LinkSpotDataPipeline(
             redis_client=sync_redis,
             postgis_conn_string=postgis_conn,
@@ -362,8 +379,12 @@ class _DataPipelineAdapter:
     ) -> tuple[list[dict], str]:
         import asyncio
         from shapely.geometry import mapping
+
         gdf = await asyncio.to_thread(
-            self._pipeline.get_buildings_in_radius, lat, lon, radius_m,
+            self._pipeline.get_buildings_in_radius,
+            lat,
+            lon,
+            radius_m,
         )
         if gdf is None or gdf.empty:
             return [], "none"
@@ -380,13 +401,15 @@ class _DataPipelineAdapter:
                 height = 10.0
             if height <= 0:
                 height = 10.0
-            buildings.append({
-                "lat": centroid.y,
-                "lon": centroid.x,
-                "height": height,
-                "ground_elevation": 0.0,
-                "geometry": mapping(row.geometry),
-            })
+            buildings.append(
+                {
+                    "lat": centroid.y,
+                    "lon": centroid.x,
+                    "height": height,
+                    "ground_elevation": 0.0,
+                    "geometry": mapping(row.geometry),
+                }
+            )
         return buildings, source
 
     async def fetch_terrain(
@@ -406,12 +429,14 @@ class _DataPipelineAdapter:
             )
             if elevation is None:
                 return []
-            return [{
-                "lat": lat,
-                "lon": lon,
-                "elevation": float(elevation),
-                "source": "copernicus_glo30",
-            }]
+            return [
+                {
+                    "lat": lat,
+                    "lon": lon,
+                    "elevation": float(elevation),
+                    "source": "copernicus_glo30",
+                }
+            ]
         except Exception as e:
             logger.warning("Terrain data unavailable: %s", str(e))
             return []
@@ -444,6 +469,7 @@ class _FallbackDataPipeline:
 # Obstruction Engine Dependency
 # ============================================================================
 
+
 async def get_obstruction_engine() -> Any:
     """Get or initialize obstruction engine singleton.
 
@@ -469,8 +495,198 @@ class _ObstructionEngineAdapter:
     def __init__(self):
         self.sector_width = 2.0
         self.n_sectors = int(360.0 / self.sector_width)
-        self.min_elevation = 25.0
+        self.min_elevation = float(settings.elevation_mask_degrees)
         self.sat_threshold = 4
+
+    @staticmethod
+    def _to_float(value: Any, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _extract_footprint_vertices(
+        self, building: dict[str, Any]
+    ) -> list[tuple[float, float]]:
+        geometry = building.get("geometry")
+        if not isinstance(geometry, dict):
+            return []
+
+        geom_type = geometry.get("type")
+        coordinates = geometry.get("coordinates")
+        if not isinstance(coordinates, list) or not coordinates:
+            return []
+
+        rings: list[list[Any]] = []
+        if geom_type == "Polygon":
+            if coordinates and isinstance(coordinates[0], list):
+                rings.append(coordinates[0])
+        elif geom_type == "MultiPolygon":
+            for polygon in coordinates:
+                if (
+                    isinstance(polygon, list)
+                    and polygon
+                    and isinstance(polygon[0], list)
+                ):
+                    rings.append(polygon[0])
+        else:
+            return []
+
+        vertices: list[tuple[float, float]] = []
+        for ring in rings:
+            for coord in ring:
+                if not isinstance(coord, (list, tuple)) or len(coord) < 2:
+                    continue
+                lon = self._to_float(coord[0], float("nan"))
+                lat = self._to_float(coord[1], float("nan"))
+                if not (math.isfinite(lat) and math.isfinite(lon)):
+                    continue
+                vertices.append((lat, lon))
+
+        return vertices
+
+    def _sector_span(self, sectors: list[int]) -> list[int]:
+        unique = sorted(set(sectors))
+        if not unique:
+            return []
+        if len(unique) == 1:
+            return unique
+
+        gaps: list[int] = []
+        for idx, sector in enumerate(unique):
+            next_sector = unique[(idx + 1) % len(unique)]
+            gaps.append((next_sector - sector) % self.n_sectors)
+
+        max_gap_idx = max(range(len(gaps)), key=lambda idx: gaps[idx])
+        start = unique[(max_gap_idx + 1) % len(unique)]
+        end = unique[max_gap_idx]
+
+        covered: list[int] = []
+        current = start
+        while True:
+            covered.append(current)
+            if current == end:
+                break
+            current = (current + 1) % self.n_sectors
+
+        return covered
+
+    def _update_profile_from_building(
+        self,
+        obstruction_profile: Any,
+        observer_lat: float,
+        observer_lon: float,
+        observer_elev: float,
+        building: dict[str, Any],
+    ) -> None:
+        import numpy as np
+        from enu_utils import azimuth_to_sector_index, wgs84_to_enu
+
+        building_height = max(0.0, self._to_float(building.get("height", 10.0), 10.0))
+        base_elevation = self._to_float(building.get("ground_elevation", 0.0), 0.0)
+
+        vertices = self._extract_footprint_vertices(building)
+        if vertices:
+            b_lats = np.array([coord[0] for coord in vertices], dtype=float)
+            b_lons = np.array([coord[1] for coord in vertices], dtype=float)
+            b_base = np.full(len(vertices), base_elevation, dtype=float)
+        else:
+            b_lat = self._to_float(building.get("lat", observer_lat), observer_lat)
+            b_lon = self._to_float(building.get("lon", observer_lon), observer_lon)
+            b_lats = np.array([b_lat], dtype=float)
+            b_lons = np.array([b_lon], dtype=float)
+            b_base = np.array([base_elevation], dtype=float)
+
+        e, n, _u = wgs84_to_enu(
+            b_lats,
+            b_lons,
+            b_base,
+            observer_lat,
+            observer_lon,
+            observer_elev,
+        )
+
+        horizontal = np.sqrt(e**2 + n**2)
+        valid = horizontal > 0.1
+        if not np.any(valid):
+            return
+
+        e_valid = e[valid]
+        n_valid = n[valid]
+        horizontal_valid = horizontal[valid]
+        roof_heights = b_base[valid] + building_height
+
+        azimuths = np.mod(np.degrees(np.arctan2(e_valid, n_valid)), 360.0)
+        elevations = np.degrees(
+            np.arctan2(roof_heights - observer_elev, horizontal_valid)
+        )
+        sectors = azimuth_to_sector_index(azimuths, self.sector_width)
+        if sectors.size == 0:
+            return
+
+        covered_sectors = self._sector_span([int(value) for value in sectors.tolist()])
+        if not covered_sectors:
+            return
+
+        max_elevation = float(np.max(elevations))
+        for sector in covered_sectors:
+            obstruction_profile[sector] = max(
+                obstruction_profile[sector], max_elevation
+            )
+
+    def _update_profile_from_terrain(
+        self,
+        obstruction_profile: Any,
+        observer_lat: float,
+        observer_lon: float,
+        observer_elev: float,
+        terrain: list[dict[str, Any]],
+    ) -> None:
+        import numpy as np
+        from enu_utils import azimuth_to_sector_index, wgs84_to_enu
+
+        valid_samples: list[tuple[float, float, float]] = []
+        for sample in terrain:
+            if not isinstance(sample, dict):
+                continue
+            t_lat = self._to_float(sample.get("lat"), float("nan"))
+            t_lon = self._to_float(sample.get("lon"), float("nan"))
+            t_elev = self._to_float(sample.get("elevation"), float("nan"))
+            if not (
+                math.isfinite(t_lat) and math.isfinite(t_lon) and math.isfinite(t_elev)
+            ):
+                continue
+            if abs(t_lat - observer_lat) < 1e-7 and abs(t_lon - observer_lon) < 1e-7:
+                continue
+            valid_samples.append((t_lat, t_lon, t_elev))
+
+        if not valid_samples:
+            return
+
+        t_lats = np.array([sample[0] for sample in valid_samples], dtype=float)
+        t_lons = np.array([sample[1] for sample in valid_samples], dtype=float)
+        t_elevs = np.array([sample[2] for sample in valid_samples], dtype=float)
+
+        e, n, u = wgs84_to_enu(
+            t_lats,
+            t_lons,
+            t_elevs,
+            observer_lat,
+            observer_lon,
+            observer_elev,
+        )
+        horizontal = np.sqrt(e**2 + n**2)
+        valid = horizontal > 0.1
+        if not np.any(valid):
+            return
+
+        azimuths = np.mod(np.degrees(np.arctan2(e[valid], n[valid])), 360.0)
+        terrain_elev = np.degrees(np.arctan2(u[valid], horizontal[valid]))
+        sectors = azimuth_to_sector_index(azimuths, self.sector_width)
+        for idx, sector in enumerate(sectors.tolist()):
+            obstruction_profile[int(sector)] = max(
+                obstruction_profile[int(sector)], float(terrain_elev[idx])
+            )
 
     def analyze_position(
         self,
@@ -483,13 +699,11 @@ class _ObstructionEngineAdapter:
     ) -> dict:
         """Perform ray-casting obstruction analysis at a single position."""
         import numpy as np
-        from enu_utils import wgs84_to_enu, azimuth_to_sector_index
-        # TODO: Pre-compute terrain influence once per point and avoid repeated projection allocations.
+        from enu_utils import azimuth_to_sector_index
 
         # Filter satellites above minimum elevation
         visible_sats = [
-            s for s in satellites
-            if s.get("elevation", 0) >= self.min_elevation
+            s for s in satellites if s.get("elevation", 0) >= self.min_elevation
         ]
         n_total = len(visible_sats)
 
@@ -505,34 +719,25 @@ class _ObstructionEngineAdapter:
         obstruction_profile = np.full(self.n_sectors, -90.0)
 
         if buildings:
-            b_lats = np.array([b.get("lat", 0.0) for b in buildings])
-            b_lons = np.array([b.get("lon", 0.0) for b in buildings])
-            b_heights = np.array([b.get("height", 10.0) for b in buildings])
-            b_base = np.array([b.get("ground_elevation", 0.0) for b in buildings])
+            for building in buildings:
+                if not isinstance(building, dict):
+                    continue
+                self._update_profile_from_building(
+                    obstruction_profile=obstruction_profile,
+                    observer_lat=lat,
+                    observer_lon=lon,
+                    observer_elev=elevation,
+                    building=building,
+                )
 
-            e, n, u = wgs84_to_enu(b_lats, b_lons, b_base, lat, lon, elevation)
-
-            h_dists = np.sqrt(e ** 2 + n ** 2)
-            valid = h_dists > 0.1
-
-            if np.any(valid):
-                e_v = e[valid]
-                n_v = n[valid]
-                h_v = b_heights[valid]
-                base_v = b_base[valid]
-                h_d = h_dists[valid]
-
-                azimuths = np.mod(np.degrees(np.arctan2(e_v, n_v)), 360.0)
-                roof_heights = base_v + h_v
-                elev_angles = np.degrees(np.arctan2(roof_heights - elevation, h_d))
-
-                sectors = azimuth_to_sector_index(azimuths, self.sector_width)
-                for sector in np.unique(sectors):
-                    mask = sectors == sector
-                    obstruction_profile[sector] = max(
-                        obstruction_profile[sector],
-                        float(np.max(elev_angles[mask])),
-                    )
+        if terrain:
+            self._update_profile_from_terrain(
+                obstruction_profile=obstruction_profile,
+                observer_lat=lat,
+                observer_lon=lon,
+                observer_elev=elevation,
+                terrain=terrain,
+            )
 
         # Check each satellite for clear LOS and build per-satellite detail
         n_clear = 0
@@ -547,27 +752,33 @@ class _ObstructionEngineAdapter:
                 n_clear += 1
             else:
                 blocked_azimuths.append(az)
-            satellite_details.append({
-                "satellite_id": sat.get("satellite_id", ""),
-                "name": sat.get("name", ""),
-                "azimuth": az,
-                "elevation": el,
-                "range_km": sat.get("range_km"),
-                "is_visible": sat.get("is_visible", True),
-                "is_obstructed": is_obstructed,
-            })
+            satellite_details.append(
+                {
+                    "satellite_id": sat.get("satellite_id", ""),
+                    "name": sat.get("name", ""),
+                    "azimuth": az,
+                    "elevation": el,
+                    "range_km": sat.get("range_km"),
+                    "is_visible": sat.get("is_visible", True),
+                    "is_obstructed": is_obstructed,
+                }
+            )
 
         # Build obstruction profile points for sky plot
         obstruction_points = []
         for i in range(self.n_sectors):
             if obstruction_profile[i] > -90.0:
                 az_center = i * self.sector_width + self.sector_width / 2
-                obstruction_points.append({
-                    "azimuth": az_center,
-                    "elevation": max(0.0, float(obstruction_profile[i])),
-                })
+                obstruction_points.append(
+                    {
+                        "azimuth": az_center,
+                        "elevation": max(0.0, float(obstruction_profile[i])),
+                    }
+                )
 
-        obstruction_pct = (len(blocked_azimuths) / n_total * 100.0) if n_total > 0 else 0.0
+        obstruction_pct = (
+            (len(blocked_azimuths) / n_total * 100.0) if n_total > 0 else 0.0
+        )
 
         return {
             "n_clear": n_clear,
@@ -582,6 +793,7 @@ class _ObstructionEngineAdapter:
 # ============================================================================
 # Route Planning Dependencies
 # ============================================================================
+
 
 async def get_osrm_client() -> Any:
     """Get or initialize OSRM client singleton."""
@@ -619,13 +831,53 @@ class _AmenityService:
     def __init__(self):
         self._overpass_failures = 0
         self._overpass_blocked_until = 0.0
+        self._road_mask_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._road_mask_ttl_seconds = 180.0
+
+    def _request_overpass(
+        self, query: str, timeout_s: float = 15.0
+    ) -> Optional[dict[str, Any]]:
+        import requests
+
+        now = time.time()
+        if self._overpass_blocked_until > now:
+            logger.warning("Overpass circuit open, skipping request")
+            return None
+
+        overpass_hosts = [
+            "https://overpass-api.de/api/interpreter",
+            "https://overpass.kumi.systems/api/interpreter",
+            "https://overpass.openstreetmap.fr/api/interpreter",
+        ]
+        last_error: Optional[Exception] = None
+
+        for host in overpass_hosts:
+            try:
+                response = requests.post(
+                    host,
+                    data={"data": query},
+                    timeout=timeout_s,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                self._overpass_failures = 0
+                self._overpass_blocked_until = 0.0
+                return payload
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Overpass host failed (%s): %s", host, exc)
+
+        self._overpass_failures += 1
+        if self._overpass_failures >= 3:
+            self._overpass_blocked_until = time.time() + 120.0
+        if last_error:
+            logger.warning("Overpass request failed: %s", last_error)
+        return None
 
     def query_amenities_along_route(
         self, geometry: list[tuple[float, float]], buffer_m: float = 500.0
     ) -> list[dict]:
         """Query OSM Overpass for parking/rest amenities near route geometry."""
-        import requests
-
         if not geometry:
             return []
 
@@ -644,39 +896,21 @@ class _AmenityService:
         [out:json][timeout:30];
         (
           node["amenity"="parking"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
-          node["amenity"="rest_area"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
           node["amenity"="fuel"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
           node["highway"="rest_area"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
-          node["amenity"="restaurant"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
-          node["amenity"="fast_food"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
-          node["amenity"="cafe"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
+          node["highway"="services"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
           way["amenity"="parking"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
+          way["highway"="rest_area"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
         );
         out center;
         """
 
-        try:
-            now = time.time()
-            if self._overpass_blocked_until > now:
-                logger.warning("Overpass circuit open, skipping amenity lookup")
-                return []
-            resp = requests.post(
-                "https://overpass-api.de/api/interpreter",
-                data={"data": query},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-            self._overpass_failures = 0
-            self._overpass_blocked_until = 0.0
-        except Exception as e:
-            logger.warning("Amenity query failed: %s", str(e))
-            self._overpass_failures += 1
-            if self._overpass_failures >= 3:
-                self._overpass_blocked_until = time.time() + 120.0
+        payload = self._request_overpass(query, timeout_s=15.0)
+        if not payload:
             return []
 
         amenities = []
+        seen: set[str] = set()
         for element in payload.get("elements", []):
             lat = element.get("lat") or element.get("center", {}).get("lat")
             lon = element.get("lon") or element.get("center", {}).get("lon")
@@ -685,20 +919,143 @@ class _AmenityService:
 
             tags = element.get("tags", {})
             amenity_type = tags.get("amenity", tags.get("highway", "unknown"))
+            if amenity_type not in {"parking", "fuel", "rest_area", "services"}:
+                continue
+
+            key = f"{amenity_type}:{float(lat):.5f}:{float(lon):.5f}"
+            if key in seen:
+                continue
+            seen.add(key)
+
             tags_str = str(tags).lower()
 
-            amenities.append({
-                "lat": float(lat),
-                "lon": float(lon),
-                "type": amenity_type,
-                "name": tags.get("name", ""),
-                "parking": amenity_type in ("parking", "rest_area"),
-                "restroom": ("toilets" in tags_str) or ("restroom" in tags_str),
-                "fuel": amenity_type == "fuel",
-                "food": amenity_type in ("restaurant", "fast_food", "cafe"),
-            })
+            amenities.append(
+                {
+                    "lat": float(lat),
+                    "lon": float(lon),
+                    "type": amenity_type,
+                    "name": tags.get("name", ""),
+                    "parking": amenity_type in ("parking", "rest_area", "services"),
+                    "restroom": ("toilets" in tags_str) or ("restroom" in tags_str),
+                    "fuel": amenity_type == "fuel",
+                    "food": False,
+                }
+            )
 
         return amenities
+
+    def query_road_access_mask(
+        self,
+        min_lat: float,
+        min_lon: float,
+        max_lat: float,
+        max_lon: float,
+    ) -> dict[str, Any]:
+        bbox = (
+            min(min_lat, max_lat),
+            min(min_lon, max_lon),
+            max(min_lat, max_lat),
+            max(min_lon, max_lon),
+        )
+        cache_key = f"{bbox[0]:.4f}:{bbox[1]:.4f}:{bbox[2]:.4f}:{bbox[3]:.4f}"
+        now = time.time()
+        cached = self._road_mask_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return cached[1]
+
+        query = f"""
+        [out:json][timeout:35];
+        (
+          way["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|unclassified|residential|living_street|service|road"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
+          way["amenity"="parking"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
+          way["highway"="rest_area"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
+          node["amenity"="parking"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
+          node["amenity"="fuel"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
+          node["highway"="rest_area"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
+          node["highway"="services"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
+        );
+        out body;
+        >;
+        out skel qt;
+        """
+
+        payload = self._request_overpass(query, timeout_s=20.0)
+        if not payload:
+            return {"roads": [], "parking_polygons": [], "parking_points": []}
+
+        driveable_highways = {
+            "motorway",
+            "motorway_link",
+            "trunk",
+            "trunk_link",
+            "primary",
+            "primary_link",
+            "secondary",
+            "secondary_link",
+            "tertiary",
+            "tertiary_link",
+            "unclassified",
+            "residential",
+            "living_street",
+            "service",
+            "road",
+        }
+
+        nodes: dict[int, tuple[float, float]] = {}
+        ways: list[dict[str, Any]] = []
+        parking_points: list[tuple[float, float]] = []
+
+        for element in payload.get("elements", []):
+            if not isinstance(element, dict):
+                continue
+            if element.get("type") == "node":
+                node_id = element.get("id")
+                lat = element.get("lat")
+                lon = element.get("lon")
+                if node_id is not None and lat is not None and lon is not None:
+                    nodes[int(node_id)] = (float(lat), float(lon))
+
+                tags = element.get("tags", {})
+                amenity = tags.get("amenity")
+                highway = tags.get("highway")
+                if amenity in {"parking", "fuel"} or highway in {
+                    "rest_area",
+                    "services",
+                }:
+                    if lat is not None and lon is not None:
+                        parking_points.append((float(lat), float(lon)))
+            elif element.get("type") == "way":
+                ways.append(element)
+
+        roads: list[list[tuple[float, float]]] = []
+        parking_polygons: list[list[tuple[float, float]]] = []
+
+        for way in ways:
+            tags = way.get("tags", {}) if isinstance(way.get("tags"), dict) else {}
+            node_ids = way.get("nodes") if isinstance(way.get("nodes"), list) else []
+            coords = [nodes[node_id] for node_id in node_ids if node_id in nodes]
+            if len(coords) < 2:
+                continue
+
+            highway = tags.get("highway")
+            if highway in driveable_highways:
+                roads.append(coords)
+
+            if tags.get("amenity") == "parking" or highway == "rest_area":
+                if len(coords) >= 4 and coords[0] == coords[-1]:
+                    parking_polygons.append(coords)
+                else:
+                    center_lat = sum(point[0] for point in coords) / len(coords)
+                    center_lon = sum(point[1] for point in coords) / len(coords)
+                    parking_points.append((center_lat, center_lon))
+
+        result = {
+            "roads": roads,
+            "parking_polygons": parking_polygons,
+            "parking_points": parking_points,
+        }
+        self._road_mask_cache[cache_key] = (now + self._road_mask_ttl_seconds, result)
+        return result
 
 
 async def get_amenity_service() -> Any:
@@ -716,12 +1073,13 @@ async def get_amenity_service() -> Any:
 # Request ID Dependency
 # ============================================================================
 
+
 def get_request_id(request: Request) -> str:
     """Extract or generate request ID for tracing.
-    
+
     Args:
         request: FastAPI request object.
-        
+
     Returns:
         str: Request ID for logging and tracing.
     """
@@ -729,9 +1087,10 @@ def get_request_id(request: Request) -> str:
     request_id = request.headers.get("X-Request-ID")
     if request_id:
         return request_id
-    
+
     # Generate new request ID
     import uuid
+
     return f"req-{uuid.uuid4().hex[:12]}"
 
 
@@ -739,21 +1098,22 @@ def get_request_id(request: Request) -> str:
 # API Key Dependency (optional)
 # ============================================================================
 
+
 async def verify_api_key(request: Request) -> Optional[str]:
     """Verify API key if configured.
-    
+
     Args:
         request: FastAPI request object.
-        
+
     Returns:
         Optional[str]: API key if valid, None if not required.
-        
+
     Raises:
         HTTPException: If API key is invalid.
     """
     if not settings.api_key:
         return None  # API key not required
-    
+
     api_key = request.headers.get(settings.api_key_header)
     if not api_key:
         raise HTTPException(
@@ -761,19 +1121,20 @@ async def verify_api_key(request: Request) -> Optional[str]:
             detail="API key required",
             headers={"WWW-Authenticate": "ApiKey"},
         )
-    
+
     if api_key != settings.api_key:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid API key",
         )
-    
+
     return api_key
 
 
 # ============================================================================
 # Combined Dependencies
 # ============================================================================
+
 
 async def get_analysis_dependencies(
     redis: Any = Depends(get_redis),
@@ -783,7 +1144,7 @@ async def get_analysis_dependencies(
     obstruction_engine: Any = Depends(get_obstruction_engine),
 ) -> dict:
     """Get all analysis dependencies in one call.
-    
+
     Returns:
         dict: Dictionary containing all analysis dependencies.
     """
@@ -800,26 +1161,27 @@ async def get_analysis_dependencies(
 # Cleanup Functions
 # ============================================================================
 
+
 async def close_dependencies() -> None:
     """Close all dependency connections.
-    
+
     Call this during application shutdown.
     """
     global _redis_pool, _db_pool, _satellite_engine, _data_pipeline, _obstruction_engine
     global _osrm_client, _amenity_service
-    
+
     # Close Redis
     if _redis_pool:
         await _redis_pool.close()
         _redis_pool = None
         logger.info("Redis connection pool closed")
-    
+
     # Close database
     if _db_pool:
         await _db_pool.close()
         _db_pool = None
         logger.info("Database connection pool closed")
-    
+
     # Clear engine references
     _satellite_engine = None
     _data_pipeline = None

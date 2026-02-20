@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 
 from config import settings
 from dependencies import (
+    get_amenity_service,
     get_data_pipeline,
     get_obstruction_engine,
     get_redis,
@@ -52,13 +53,14 @@ router = APIRouter(prefix="/api/v1", tags=["Analysis"])
 # Helper Functions
 # ============================================================================
 
+
 def _generate_cache_key(prefix: str, params: dict) -> str:
     """Generate cache key from parameters.
-    
+
     Args:
         prefix: Cache key prefix.
         params: Parameters to hash.
-        
+
     Returns:
         str: Cache key.
     """
@@ -79,10 +81,10 @@ def _zone_to_status(zone: Zone) -> str:
 
 def _classify_zone(clear_ratio: float) -> Zone:
     """Classify coverage zone based on clear satellite ratio.
-    
+
     Args:
         clear_ratio: Ratio of clear satellites (0.0 to 1.0).
-        
+
     Returns:
         Zone: Zone classification.
     """
@@ -104,24 +106,24 @@ def _generate_grid_points(
     spacing_m: int,
 ) -> list[tuple[float, float]]:
     """Generate grid points for heatmap analysis.
-    
+
     Args:
         center_lat: Center latitude.
         center_lon: Center longitude.
         radius_m: Radius in meters.
         spacing_m: Grid spacing in meters.
-        
+
     Returns:
         list: List of (lat, lon) tuples.
     """
     import math
-    
+
     points = []
-    
+
     # Convert spacing to approximate degrees (rough approximation)
     # 1 degree latitude ≈ 111 km
     lat_spacing = spacing_m / 111000.0
-    
+
     # Calculate number of steps with hard upper bound.
     n_steps = int(radius_m / spacing_m)
     n_steps = min(n_steps, 150)
@@ -129,23 +131,236 @@ def _generate_grid_points(
     for i in range(-n_steps, n_steps + 1):
         for j in range(-n_steps, n_steps + 1):
             lat = center_lat + (i * lat_spacing)
-            
+
             # Longitude spacing varies with latitude
             lon_spacing = lat_spacing / math.cos(math.radians(lat))
             lon = center_lon + (j * lon_spacing)
-            
+
             # Check if point is within radius
             dx = (lon - center_lon) * 111000.0 * math.cos(math.radians(center_lat))
             dy = (lat - center_lat) * 111000.0
             distance = math.sqrt(dx * dx + dy * dy)
-            
+
             if distance <= radius_m:
                 points.append((lat, lon))
-    
+
     return points
 
 
-def _normalize_bool(record: dict[str, Any], primary: str, fallback: str, default: bool) -> bool:
+def _point_in_polygon_xy(
+    px: float, py: float, polygon: list[tuple[float, float]]
+) -> bool:
+    inside = False
+    n = len(polygon)
+    if n < 3:
+        return False
+
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        intersects = ((yi > py) != (yj > py)) and (
+            px < (xj - xi) * (py - yi) / max(yj - yi, 1e-12) + xi
+        )
+        if intersects:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _distance_to_segment_m(
+    px: float,
+    py: float,
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+) -> float:
+    seg_x = bx - ax
+    seg_y = by - ay
+    seg_len_sq = seg_x * seg_x + seg_y * seg_y
+    if seg_len_sq <= 1e-9:
+        return math.hypot(px - ax, py - ay)
+
+    t = ((px - ax) * seg_x + (py - ay) * seg_y) / seg_len_sq
+    t = max(0.0, min(1.0, t))
+    proj_x = ax + t * seg_x
+    proj_y = ay + t * seg_y
+    return math.hypot(px - proj_x, py - proj_y)
+
+
+def _filter_driveable_grid_points(
+    points: list[tuple[float, float]],
+    center_lat: float,
+    center_lon: float,
+    access_mask: dict[str, Any],
+    road_buffer_m: float = 18.0,
+    parking_buffer_m: float = 35.0,
+) -> list[tuple[float, float]]:
+    if not points:
+        return []
+
+    roads = access_mask.get("roads", []) if isinstance(access_mask, dict) else []
+    parking_polygons = (
+        access_mask.get("parking_polygons", []) if isinstance(access_mask, dict) else []
+    )
+    parking_points = (
+        access_mask.get("parking_points", []) if isinstance(access_mask, dict) else []
+    )
+    if not roads and not parking_polygons and not parking_points:
+        return []
+
+    meters_per_deg_lat = 111320.0
+    meters_per_deg_lon = max(
+        1e-6, meters_per_deg_lat * math.cos(math.radians(center_lat))
+    )
+
+    def to_xy(lat: float, lon: float) -> tuple[float, float]:
+        x = (lon - center_lon) * meters_per_deg_lon
+        y = (lat - center_lat) * meters_per_deg_lat
+        return x, y
+
+    cell_size = 120.0
+
+    def cell_id(x: float, y: float) -> tuple[int, int]:
+        return int(math.floor(x / cell_size)), int(math.floor(y / cell_size))
+
+    road_segments: list[
+        tuple[float, float, float, float, float, float, float, float]
+    ] = []
+    road_cells: dict[tuple[int, int], list[int]] = {}
+
+    for road in roads:
+        if not isinstance(road, list) or len(road) < 2:
+            continue
+        coords = []
+        for coord in road:
+            if not isinstance(coord, (list, tuple)) or len(coord) < 2:
+                continue
+            lat = float(coord[0])
+            lon = float(coord[1])
+            coords.append(to_xy(lat, lon))
+        if len(coords) < 2:
+            continue
+
+        for idx in range(1, len(coords)):
+            ax, ay = coords[idx - 1]
+            bx, by = coords[idx]
+            min_x = min(ax, bx) - road_buffer_m
+            max_x = max(ax, bx) + road_buffer_m
+            min_y = min(ay, by) - road_buffer_m
+            max_y = max(ay, by) + road_buffer_m
+            segment_index = len(road_segments)
+            road_segments.append((ax, ay, bx, by, min_x, max_x, min_y, max_y))
+            min_cx = int(math.floor(min_x / cell_size))
+            max_cx = int(math.floor(max_x / cell_size))
+            min_cy = int(math.floor(min_y / cell_size))
+            max_cy = int(math.floor(max_y / cell_size))
+            for cx in range(min_cx, max_cx + 1):
+                for cy in range(min_cy, max_cy + 1):
+                    road_cells.setdefault((cx, cy), []).append(segment_index)
+
+    polygon_items: list[
+        tuple[list[tuple[float, float]], tuple[float, float, float, float]]
+    ] = []
+    polygon_cells: dict[tuple[int, int], list[int]] = {}
+
+    for polygon in parking_polygons:
+        if not isinstance(polygon, list) or len(polygon) < 3:
+            continue
+        vertices: list[tuple[float, float]] = []
+        for coord in polygon:
+            if not isinstance(coord, (list, tuple)) or len(coord) < 2:
+                continue
+            lat = float(coord[0])
+            lon = float(coord[1])
+            vertices.append(to_xy(lat, lon))
+        if len(vertices) < 3:
+            continue
+
+        xs = [point[0] for point in vertices]
+        ys = [point[1] for point in vertices]
+        bounds = (min(xs), max(xs), min(ys), max(ys))
+        polygon_index = len(polygon_items)
+        polygon_items.append((vertices, bounds))
+
+        min_cx = int(math.floor(bounds[0] / cell_size))
+        max_cx = int(math.floor(bounds[1] / cell_size))
+        min_cy = int(math.floor(bounds[2] / cell_size))
+        max_cy = int(math.floor(bounds[3] / cell_size))
+        for cx in range(min_cx, max_cx + 1):
+            for cy in range(min_cy, max_cy + 1):
+                polygon_cells.setdefault((cx, cy), []).append(polygon_index)
+
+    parking_xy: list[tuple[float, float]] = []
+    parking_cells: dict[tuple[int, int], list[int]] = {}
+    for coord in parking_points:
+        if not isinstance(coord, (list, tuple)) or len(coord) < 2:
+            continue
+        lat = float(coord[0])
+        lon = float(coord[1])
+        x, y = to_xy(lat, lon)
+        idx = len(parking_xy)
+        parking_xy.append((x, y))
+        cx, cy = cell_id(x, y)
+        parking_cells.setdefault((cx, cy), []).append(idx)
+
+    def nearby_cells(x: float, y: float, radius_m: float) -> list[tuple[int, int]]:
+        cx, cy = cell_id(x, y)
+        delta = max(1, int(math.ceil(radius_m / cell_size)))
+        cells = []
+        for ix in range(cx - delta, cx + delta + 1):
+            for iy in range(cy - delta, cy + delta + 1):
+                cells.append((ix, iy))
+        return cells
+
+    filtered: list[tuple[float, float]] = []
+    for lat, lon in points:
+        x, y = to_xy(lat, lon)
+
+        matched = False
+        for key in nearby_cells(x, y, parking_buffer_m):
+            for idx in parking_cells.get(key, []):
+                px, py = parking_xy[idx]
+                if math.hypot(x - px, y - py) <= parking_buffer_m:
+                    matched = True
+                    break
+            if matched:
+                break
+
+        if not matched:
+            for key in nearby_cells(x, y, 0.0):
+                for idx in polygon_cells.get(key, []):
+                    vertices, bounds = polygon_items[idx]
+                    if x < bounds[0] or x > bounds[1] or y < bounds[2] or y > bounds[3]:
+                        continue
+                    if _point_in_polygon_xy(x, y, vertices):
+                        matched = True
+                        break
+                if matched:
+                    break
+
+        if not matched:
+            for key in nearby_cells(x, y, road_buffer_m):
+                for idx in road_cells.get(key, []):
+                    ax, ay, bx, by, min_x, max_x, min_y, max_y = road_segments[idx]
+                    if x < min_x or x > max_x or y < min_y or y > max_y:
+                        continue
+                    if _distance_to_segment_m(x, y, ax, ay, bx, by) <= road_buffer_m:
+                        matched = True
+                        break
+                if matched:
+                    break
+
+        if matched:
+            filtered.append((lat, lon))
+
+    return filtered
+
+
+def _normalize_bool(
+    record: dict[str, Any], primary: str, fallback: str, default: bool
+) -> bool:
     """Normalize bool flags across legacy payload variants."""
     value = record.get(primary)
     if value is None:
@@ -177,7 +392,9 @@ def _normalize_obstruction_result(raw: Any) -> dict[str, Any]:
     return {
         "n_clear": n_clear,
         "n_total": n_total,
-        "obstruction_pct": min(100.0, max(0.0, float(raw.get("obstruction_pct", 0.0) or 0.0))),
+        "obstruction_pct": min(
+            100.0, max(0.0, float(raw.get("obstruction_pct", 0.0) or 0.0))
+        ),
         "blocked_azimuths": list(raw.get("blocked_azimuths", []) or []),
         "satellite_details": list(raw.get("satellite_details", []) or []),
         "obstruction_profile": list(raw.get("obstruction_profile", []) or []),
@@ -187,6 +404,7 @@ def _normalize_obstruction_result(raw: Any) -> dict[str, Any]:
 # ============================================================================
 # Single Position Analysis Endpoint
 # ============================================================================
+
 
 @router.post(
     "/analyze",
@@ -221,7 +439,7 @@ async def analyze_position(
     request_id: str = Depends(get_request_id),
 ) -> AnalyzeResponse:
     """Analyze satellite visibility at a single position.
-    
+
     Args:
         request: FastAPI request object.
         body: Analysis request parameters.
@@ -230,10 +448,10 @@ async def analyze_position(
         data_pipeline: Data pipeline instance.
         obstruction_engine: Obstruction engine instance.
         request_id: Request ID for tracing.
-        
+
     Returns:
         AnalyzeResponse: Analysis results.
-        
+
     Raises:
         HTTPException: If analysis fails.
     """
@@ -246,9 +464,7 @@ async def analyze_position(
             detail="Latitude/longitude must be finite numbers",
         )
 
-    logger.info(
-        f"[{request_id}] Starting analysis for lat={body.lat}, lon={body.lon}"
-    )
+    logger.info(f"[{request_id}] Starting analysis for lat={body.lat}, lon={body.lon}")
 
     try:
         # Check cache first (round timestamp to nearest minute for cache hits)
@@ -261,14 +477,14 @@ async def analyze_position(
             "timeout_s": settings.analyze_timeout_seconds,
         }
         cache_key = _generate_cache_key("analyze", cache_params)
-        
+
         cached_result = await redis.get(cache_key)
         if cached_result:
             logger.info(f"[{request_id}] Cache hit for analysis")
             result = json.loads(cached_result)
             return AnalyzeResponse(**result)
         logger.debug("[%s] Analyze cache miss", request_id)
-        
+
         # Step 1: Get visible satellites
         satellites = await asyncio.wait_for(
             satellite_engine.get_visible_satellites(
@@ -279,10 +495,10 @@ async def analyze_position(
             ),
             timeout=settings.satellite_timeout_seconds,
         )
-        
+
         n_total = len(satellites)
         logger.debug(f"[{request_id}] Found {n_total} visible satellites")
-        
+
         # Step 2: Fetch building and terrain data
         buildings_result = await data_pipeline.fetch_buildings(
             lat=body.lat,
@@ -294,24 +510,26 @@ async def analyze_position(
         else:
             buildings = buildings_result or []
             building_source = "unknown"
-        
+
         terrain = await data_pipeline.fetch_terrain(
             lat=body.lat,
             lon=body.lon,
             radius_m=5000.0,  # 5km radius for terrain
         )
         if time.time() > deadline:
-            raise asyncio.TimeoutError("analyze deadline exceeded before obstruction stage")
+            raise asyncio.TimeoutError(
+                "analyze deadline exceeded before obstruction stage"
+            )
         if not isinstance(buildings, list):
             buildings = []
         if not isinstance(terrain, list):
             terrain = []
-        
+
         logger.debug(
             f"[{request_id}] Fetched {len(buildings)} buildings, "
             f"{len(terrain)} terrain samples"
         )
-        
+
         # Step 3: Perform obstruction analysis
         obstruction_raw = obstruction_engine.analyze_position(
             lat=body.lat,
@@ -345,7 +563,11 @@ async def analyze_position(
             )
 
         terrain_source = next(
-            (t.get("source") for t in terrain if isinstance(t, dict) and t.get("source")),
+            (
+                t.get("source")
+                for t in terrain
+                if isinstance(t, dict) and t.get("source")
+            ),
             None,
         )
         if terrain:
@@ -380,7 +602,10 @@ async def analyze_position(
                 obstructed=_normalize_bool(sd, "obstructed", "is_obstructed", False),
             )
             for sd in sat_details
-            if isinstance(sd, dict) and ("satellite_id" in sd or "id" in sd) and "azimuth" in sd and "elevation" in sd
+            if isinstance(sd, dict)
+            and ("satellite_id" in sd or "id" in sd)
+            and "azimuth" in sd
+            and "elevation" in sd
         ]
 
         obstructions_out = [
@@ -416,22 +641,22 @@ async def analyze_position(
             obstructions=obstructions_out,
             data_quality=data_quality,
         )
-        
+
         # Cache result
         await redis.setex(
             cache_key,
             settings.cache_ttl_seconds,
             json.dumps(response.model_dump(mode="json")),
         )
-        
+
         elapsed_ms = (time.time() - start_time) * 1000
         logger.info(
             f"[{request_id}] Analysis completed in {elapsed_ms:.1f}ms: "
             f"zone={zone.value}, n_clear={n_clear}/{n_total_calc}"
         )
-        
+
         return response
-        
+
     except HTTPException:
         raise
     except asyncio.TimeoutError as e:
@@ -448,7 +673,11 @@ async def analyze_position(
         elif "validation" in message:
             category = "validation"
         logger.error(f"[{request_id}] Analysis failed [{category}]: {e}", exc_info=True)
-        status_code = status.HTTP_503_SERVICE_UNAVAILABLE if category == "upstream_unavailable" else status.HTTP_500_INTERNAL_SERVER_ERROR
+        status_code = (
+            status.HTTP_503_SERVICE_UNAVAILABLE
+            if category == "upstream_unavailable"
+            else status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
         raise HTTPException(
             status_code=status_code,
             detail=f"Analysis failed: {str(e)}",
@@ -458,6 +687,7 @@ async def analyze_position(
 # ============================================================================
 # Heatmap Analysis Endpoint
 # ============================================================================
+
 
 @router.post(
     "/heatmap",
@@ -496,10 +726,11 @@ async def generate_heatmap(
     satellite_engine: Any = Depends(get_satellite_engine),
     data_pipeline: Any = Depends(get_data_pipeline),
     obstruction_engine: Any = Depends(get_obstruction_engine),
+    amenity_service: Any = Depends(get_amenity_service),
     request_id: str = Depends(get_request_id),
 ) -> HeatmapResponse:
     """Generate coverage heatmap for an area.
-    
+
     Args:
         request: FastAPI request object.
         body: Heatmap request parameters.
@@ -508,22 +739,22 @@ async def generate_heatmap(
         data_pipeline: Data pipeline instance.
         obstruction_engine: Obstruction engine instance.
         request_id: Request ID for tracing.
-        
+
     Returns:
         HeatmapResponse: GeoJSON FeatureCollection with coverage data.
-        
+
     Raises:
         HTTPException: If heatmap generation fails.
     """
     start_time = time.time()
     timestamp = body.timestamp or datetime.now(timezone.utc)
-    
+
     logger.info(
         f"[{request_id}] Starting heatmap generation: "
         f"center=({body.lat}, {body.lon}), radius={body.radius_m}m, "
         f"spacing={body.spacing_m}m"
     )
-    
+
     try:
         # Check cache first (round timestamp to nearest minute for cache hits)
         cache_ts = timestamp.replace(second=0, microsecond=0)
@@ -534,6 +765,7 @@ async def generate_heatmap(
             "spacing_m": body.spacing_m,
             "timestamp": cache_ts.isoformat(),
             "timeout_s": settings.heatmap_timeout_seconds,
+            "driveable_only": True,
         }
         cache_key = _generate_cache_key("heatmap", cache_params)
 
@@ -542,7 +774,7 @@ async def generate_heatmap(
             logger.info(f"[{request_id}] Cache hit for heatmap")
             result = json.loads(cached_result)
             return HeatmapResponse(**result)
-        
+
         # Generate grid points
         grid_points = _generate_grid_points(
             center_lat=body.lat,
@@ -550,7 +782,7 @@ async def generate_heatmap(
             radius_m=body.radius_m,
             spacing_m=body.spacing_m,
         )
-        
+
         # Check point limit
         if len(grid_points) > settings.heatmap_max_points:
             raise HTTPException(
@@ -562,9 +794,64 @@ async def generate_heatmap(
                 ),
             )
         deadline = start_time + settings.heatmap_timeout_seconds
-        
-        logger.info(f"[{request_id}] Analyzing {len(grid_points)} grid points")
-        
+
+        road_mask_applied = False
+        road_mask_warnings: list[str] = []
+        accessible_points: list[tuple[float, float]] = []
+
+        lat_delta = body.radius_m / 111000.0 + 0.002
+        lon_delta = lat_delta / max(math.cos(math.radians(body.lat)), 1e-6)
+        min_lat = body.lat - lat_delta
+        max_lat = body.lat + lat_delta
+        min_lon = body.lon - lon_delta
+        max_lon = body.lon + lon_delta
+
+        try:
+            access_mask = await asyncio.wait_for(
+                asyncio.to_thread(
+                    amenity_service.query_road_access_mask,
+                    min_lat,
+                    min_lon,
+                    max_lat,
+                    max_lon,
+                ),
+                timeout=min(12.0, settings.heatmap_timeout_seconds),
+            )
+            if isinstance(access_mask, dict) and (
+                access_mask.get("roads")
+                or access_mask.get("parking_polygons")
+                or access_mask.get("parking_points")
+            ):
+                road_mask_applied = True
+                accessible_points = _filter_driveable_grid_points(
+                    points=grid_points,
+                    center_lat=body.lat,
+                    center_lon=body.lon,
+                    access_mask=access_mask,
+                    road_buffer_m=settings.heatmap_road_mask_buffer_meters,
+                    parking_buffer_m=settings.heatmap_parking_mask_buffer_meters,
+                )
+                if not accessible_points:
+                    road_mask_warnings.append(
+                        "Road/parking mask removed all off-road cells for this area"
+                    )
+            else:
+                road_mask_warnings.append(
+                    "Road/parking mask unavailable - suppressing off-road recommendations"
+                )
+        except Exception as exc:
+            logger.warning("[%s] Road mask lookup failed: %s", request_id, exc)
+            road_mask_warnings.append(
+                "Road/parking mask lookup failed - suppressing off-road recommendations"
+            )
+
+        if not road_mask_applied:
+            accessible_points = []
+
+        logger.info(
+            f"[{request_id}] Analyzing {len(accessible_points)} driveable grid points"
+        )
+
         # Fetch buildings and terrain for the entire area
         buildings_result = await data_pipeline.fetch_buildings(
             lat=body.lat,
@@ -576,7 +863,7 @@ async def generate_heatmap(
         else:
             buildings = buildings_result or []
             building_source = "unknown"
-        
+
         terrain = await data_pipeline.fetch_terrain(
             lat=body.lat,
             lon=body.lon,
@@ -585,8 +872,11 @@ async def generate_heatmap(
         if not isinstance(terrain, list):
             terrain = []
         if not terrain:
-            logger.warning("[%s] Terrain unavailable for heatmap, continuing in degraded mode", request_id)
-        
+            logger.warning(
+                "[%s] Terrain unavailable for heatmap, continuing in degraded mode",
+                request_id,
+            )
+
         # Get all satellites for the area
         satellites = await asyncio.wait_for(
             satellite_engine.get_visible_satellites(
@@ -600,7 +890,9 @@ async def generate_heatmap(
 
         # Build data-quality metadata for transparency
         dq_sources = ["satellites"]
-        dq_warnings = []
+        dq_warnings = list(road_mask_warnings)
+        if road_mask_applied:
+            dq_sources.append("roads:overpass")
         if buildings:
             building_quality = "full"
             if building_source and building_source not in ("unknown", "none"):
@@ -614,7 +906,11 @@ async def generate_heatmap(
             )
 
         terrain_source = next(
-            (t.get("source") for t in terrain if isinstance(t, dict) and t.get("source")),
+            (
+                t.get("source")
+                for t in terrain
+                if isinstance(t, dict) and t.get("source")
+            ),
             None,
         )
         if terrain:
@@ -633,15 +929,20 @@ async def generate_heatmap(
             sources=dq_sources,
             warnings=dq_warnings,
         )
-        
+
         # Precompute half-cell sizes for polygon generation
         half_lat = (body.spacing_m / 111000.0) / 2
 
         # Analyze each grid point
         features = []
-        for idx, (lat, lon) in enumerate(grid_points):
+        for idx, (lat, lon) in enumerate(accessible_points):
             if time.time() > deadline:
-                logger.warning("[%s] Heatmap budget exceeded at point %d/%d", request_id, idx, len(grid_points))
+                logger.warning(
+                    "[%s] Heatmap budget exceeded at point %d/%d",
+                    request_id,
+                    idx,
+                    len(accessible_points),
+                )
                 break
             if idx and idx % 64 == 0:
                 await asyncio.sleep(0)
@@ -665,13 +966,15 @@ async def generate_heatmap(
 
             # Build polygon cell (square) around grid point
             half_lon = half_lat / max(math.cos(math.radians(lat)), 1e-10)
-            polygon_coords = [[
-                [lon - half_lon, lat - half_lat],
-                [lon + half_lon, lat - half_lat],
-                [lon + half_lon, lat + half_lat],
-                [lon - half_lon, lat + half_lat],
-                [lon - half_lon, lat - half_lat],
-            ]]
+            polygon_coords = [
+                [
+                    [lon - half_lon, lat - half_lat],
+                    [lon + half_lon, lat - half_lat],
+                    [lon + half_lon, lat + half_lat],
+                    [lon - half_lon, lat + half_lat],
+                    [lon - half_lon, lat - half_lat],
+                ]
+            ]
 
             # Create GeoJSON feature with frontend-expected properties
             feature = GeoJSONFeature(
@@ -699,13 +1002,15 @@ async def generate_heatmap(
             geom = bldg.get("geometry")
             if geom:
                 try:
-                    building_features.append(GeoJSONFeature(
-                        id=f"b{bidx}",
-                        geometry=GeoJSONGeometry(**geom),
-                        properties={
-                            "height": bldg.get("height", 0),
-                        },
-                    ))
+                    building_features.append(
+                        GeoJSONFeature(
+                            id=f"b{bidx}",
+                            geometry=GeoJSONGeometry(**geom),
+                            properties={
+                                "height": bldg.get("height", 0),
+                            },
+                        )
+                    )
                 except Exception:
                     continue
 
@@ -726,15 +1031,15 @@ async def generate_heatmap(
             settings.cache_ttl_seconds * 2,
             json.dumps(response.model_dump(mode="json")),
         )
-        
+
         elapsed_ms = (time.time() - start_time) * 1000
         logger.info(
             f"[{request_id}] Heatmap generated in {elapsed_ms:.1f}ms: "
             f"{len(grid_points)} points"
         )
-        
+
         return response
-        
+
     except HTTPException:
         raise
     except asyncio.TimeoutError as e:
@@ -748,8 +1053,14 @@ async def generate_heatmap(
         category = "internal_error"
         if "connection" in message or "timeout" in message:
             category = "upstream_unavailable"
-        logger.error(f"[{request_id}] Heatmap generation failed [{category}]: {e}", exc_info=True)
-        status_code = status.HTTP_503_SERVICE_UNAVAILABLE if category == "upstream_unavailable" else status.HTTP_500_INTERNAL_SERVER_ERROR
+        logger.error(
+            f"[{request_id}] Heatmap generation failed [{category}]: {e}", exc_info=True
+        )
+        status_code = (
+            status.HTTP_503_SERVICE_UNAVAILABLE
+            if category == "upstream_unavailable"
+            else status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
         raise HTTPException(
             status_code=status_code,
             detail=f"Heatmap generation failed: {str(e)}",

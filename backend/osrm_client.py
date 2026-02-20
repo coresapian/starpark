@@ -46,11 +46,12 @@ class OSRMClient:
         Returns:
             dict with keys geometry, distance_m, duration_s, or None on failure.
         """
-        profiles = [profile]
-        defaults = fallback_profiles or ["driving", "walking", "cycling"]
-        for alt in defaults:
-            if alt not in profiles:
-                profiles.append(alt)
+        primary_profile = str(profile or "driving").strip().lower() or "driving"
+        profiles = [primary_profile]
+        for alt in fallback_profiles or []:
+            normalized = str(alt or "").strip().lower()
+            if normalized and normalized not in profiles:
+                profiles.append(normalized)
 
         coords = f"{origin[1]},{origin[0]};{destination[1]},{destination[0]}"
         params = {
@@ -83,7 +84,8 @@ class OSRMClient:
 
                     route = data["routes"][0]
                     geometry = [
-                        (coord[1], coord[0]) for coord in route["geometry"]["coordinates"]
+                        (coord[1], coord[0])
+                        for coord in route["geometry"]["coordinates"]
                     ]
                     return {
                         "geometry": geometry,
@@ -104,7 +106,11 @@ class OSRMClient:
                             e,
                         )
 
-        logger.error("OSRM request exhausted all profiles (%s): %s", ",".join(profiles), last_error)
+        logger.error(
+            "OSRM request exhausted all profiles (%s): %s",
+            ",".join(profiles),
+            last_error,
+        )
         return None
 
     def sample_route_points(
@@ -124,18 +130,22 @@ class OSRMClient:
         if not geometry or len(geometry) < 2:
             return []
 
-        points = [{
-            "lat": geometry[0][0],
-            "lon": geometry[0][1],
-            "distance_along_m": 0.0,
-        }]
+        points = [
+            {
+                "lat": geometry[0][0],
+                "lon": geometry[0][1],
+                "distance_along_m": 0.0,
+            }
+        ]
         accumulated = 0.0
         next_sample = float(interval_m)
 
         for i in range(1, len(geometry)):
             seg_start = geometry[i - 1]
             seg_end = geometry[i]
-            seg_dist = self._haversine(seg_start[0], seg_start[1], seg_end[0], seg_end[1])
+            seg_dist = self._haversine(
+                seg_start[0], seg_start[1], seg_end[0], seg_end[1]
+            )
             accumulated += seg_dist
 
             while seg_dist > 0 and accumulated >= next_sample:
@@ -143,25 +153,25 @@ class OSRMClient:
                 ratio = 1.0 - (overshoot / seg_dist)
                 lat = seg_start[0] + ratio * (seg_end[0] - seg_start[0])
                 lon = seg_start[1] + ratio * (seg_end[1] - seg_start[1])
-                points.append({
-                    "lat": lat,
-                    "lon": lon,
-                    "distance_along_m": next_sample,
-                })
+                points.append(
+                    {
+                        "lat": lat,
+                        "lon": lon,
+                        "distance_along_m": next_sample,
+                    }
+                )
                 next_sample += interval_m
 
         total_distance = accumulated
         end_lat, end_lon = geometry[-1]
-        if (
-            not points
-            or points[-1]["lat"] != end_lat
-            or points[-1]["lon"] != end_lon
-        ):
-            points.append({
-                "lat": end_lat,
-                "lon": end_lon,
-                "distance_along_m": total_distance,
-            })
+        if not points or points[-1]["lat"] != end_lat or points[-1]["lon"] != end_lon:
+            points.append(
+                {
+                    "lat": end_lat,
+                    "lon": end_lon,
+                    "distance_along_m": total_distance,
+                }
+            )
 
         return points
 

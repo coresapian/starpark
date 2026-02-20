@@ -14,9 +14,11 @@ from fastapi.testclient import TestClient
 if "redis.asyncio" not in sys.modules:
     redis_mod = types.ModuleType("redis")
     redis_async_mod = types.ModuleType("redis.asyncio")
+
     class _StubRedis:
         async def ping(self):
             return True
+
     redis_async_mod.Redis = _StubRedis
     redis_async_mod.RedisError = Exception
     redis_async_mod.from_url = lambda *args, **kwargs: _StubRedis()
@@ -124,13 +126,15 @@ class _MockDataPipeline:
                     "ground_elevation": 0.0,
                     "geometry": {
                         "type": "Polygon",
-                        "coordinates": [[
-                            [-74.0061, 40.7129],
-                            [-74.0058, 40.7129],
-                            [-74.0058, 40.7131],
-                            [-74.0061, 40.7131],
-                            [-74.0061, 40.7129],
-                        ]],
+                        "coordinates": [
+                            [
+                                [-74.0061, 40.7129],
+                                [-74.0058, 40.7129],
+                                [-74.0058, 40.7131],
+                                [-74.0061, 40.7131],
+                                [-74.0061, 40.7129],
+                            ]
+                        ],
                     },
                 }
             ],
@@ -138,7 +142,14 @@ class _MockDataPipeline:
         )
 
     async def fetch_terrain(self, **kwargs):
-        return [{"lat": kwargs["lat"], "lon": kwargs["lon"], "elevation": 12.3, "source": "copernicus_glo30"}]
+        return [
+            {
+                "lat": kwargs["lat"],
+                "lon": kwargs["lon"],
+                "elevation": 12.3,
+                "source": "copernicus_glo30",
+            }
+        ]
 
 
 class _MockObstructionEngine:
@@ -178,12 +189,16 @@ class _MockObstructionEngine:
 
 
 class _MockOSRMClient:
-    def get_route(self, origin, destination, profile="driving"):
+    def get_route(self, origin, destination, profile="driving", fallback_profiles=None):
         _ = profile
+        _ = fallback_profiles
         return {
             "geometry": [
                 origin,
-                ((origin[0] + destination[0]) / 2.0, (origin[1] + destination[1]) / 2.0),
+                (
+                    (origin[0] + destination[0]) / 2.0,
+                    (origin[1] + destination[1]) / 2.0,
+                ),
                 destination,
             ],
             "distance_m": 20000.0,
@@ -221,6 +236,26 @@ class _MockAmenityService:
                 "food": False,
             }
         ]
+
+    def query_road_access_mask(self, min_lat, min_lon, max_lat, max_lon):
+        mid_lat = (min_lat + max_lat) / 2.0
+        mid_lon = (min_lon + max_lon) / 2.0
+        return {
+            "roads": [
+                [(min_lat, mid_lon), (max_lat, mid_lon)],
+                [(mid_lat, min_lon), (mid_lat, max_lon)],
+            ],
+            "parking_polygons": [
+                [
+                    (mid_lat - 0.0004, mid_lon - 0.0004),
+                    (mid_lat - 0.0004, mid_lon + 0.0004),
+                    (mid_lat + 0.0004, mid_lon + 0.0004),
+                    (mid_lat + 0.0004, mid_lon - 0.0004),
+                    (mid_lat - 0.0004, mid_lon - 0.0004),
+                ]
+            ],
+            "parking_points": [(mid_lat, mid_lon)],
+        }
 
 
 def _build_test_client() -> TestClient:
@@ -327,6 +362,7 @@ class TestAnalysisEndpoints(unittest.TestCase):
         self.assertIn("buildings", data)
         self.assertIn("center", data)
         self.assertIn("data_quality", data)
+        self.assertIn("roads:overpass", data["data_quality"]["sources"])
 
     def test_analyze_invalid_latitude(self):
         response = self.client.post(
@@ -383,6 +419,7 @@ class TestRoutePlanningEndpoints(unittest.TestCase):
         self.assertIn("mission_summary", data)
         self.assertIn("signal_forecast", data)
         self.assertIn("data_quality", data)
+        self.assertTrue(all(wp["type"] == "known_parking" for wp in data["waypoints"]))
 
     def test_route_plan_with_addresses(self):
         response = self.client.post(
@@ -396,6 +433,133 @@ class TestRoutePlanningEndpoints(unittest.TestCase):
         data = response.json()
         self.assertGreater(data["mission_summary"]["total_distance_m"], 0)
         self.assertIsInstance(data["waypoints"], list)
+
+
+class TestRouteCorridorFiltering(unittest.TestCase):
+    def test_corridor_filter_keeps_near_route_and_dedupes(self):
+        route_geometry = [
+            (39.7392, -104.9903),
+            (39.8200, -105.0500),
+            (40.0150, -105.2705),
+        ]
+
+        amenities = [
+            {
+                "lat": 39.8200,
+                "lon": -105.0500,
+                "name": "Primary Rest",
+                "parking": True,
+                "fuel": False,
+            },
+            {
+                "lat": 39.8201,
+                "lon": -105.0501,
+                "name": "Duplicate Candidate",
+                "parking": False,
+                "fuel": False,
+            },
+            {
+                "lat": 39.9000,
+                "lon": -104.6000,
+                "name": "Far Off Route",
+                "parking": True,
+                "fuel": True,
+            },
+        ]
+
+        filtered = route._filter_amenity_candidates_to_corridor(
+            amenities=amenities,
+            route_geometry=route_geometry,
+            corridor_m=120.0,
+            max_candidates=20,
+        )
+
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["name"], "Primary Rest")
+        self.assertLessEqual(filtered[0]["distance_from_route_m"], 120.0)
+
+
+class TestWaypointReliabilityGating(unittest.TestCase):
+    def test_rank_waypoints_filters_low_reliability_candidates(self):
+        candidate_results = [
+            {
+                "lat": 39.8200,
+                "lon": -105.0500,
+                "name": "Low Reliability Stop",
+                "parking": True,
+                "restroom": True,
+                "fuel": False,
+                "distance_from_route_m": 18.0,
+                "distance_along_m": 2500.0,
+                "n_visible": 8,
+                "n_total": 10,
+                "zone": Zone.GOOD,
+                "max_obstruction_deg": 20.0,
+                "reliability_pct": 49.9,
+                "best_window": "50% clear over 30m; best 12:00Z",
+            },
+            {
+                "lat": 39.9000,
+                "lon": -105.1500,
+                "name": "Reliable Stop",
+                "parking": True,
+                "restroom": False,
+                "fuel": True,
+                "distance_from_route_m": 22.0,
+                "distance_along_m": 5500.0,
+                "n_visible": 9,
+                "n_total": 10,
+                "zone": Zone.GOOD,
+                "max_obstruction_deg": 12.0,
+                "reliability_pct": 70.0,
+                "best_window": "70% clear over 30m; best 12:20Z",
+            },
+        ]
+
+        waypoints = route._rank_waypoints(
+            candidate_results,
+            route={"distance_m": 20000.0, "duration_s": 1200.0},
+        )
+
+        self.assertEqual(len(waypoints), 1)
+        self.assertEqual(waypoints[0].name, "Reliable Stop")
+        self.assertEqual(waypoints[0].best_window, "70% clear over 30m; best 12:20Z")
+
+
+class TestHeatmapRoadMaskFiltering(unittest.TestCase):
+    def test_driveable_grid_filter_removes_offroad_points(self):
+        center_lat = 40.0000
+        center_lon = -105.0000
+        points = [
+            (center_lat, center_lon),
+            (center_lat + 0.0040, center_lon + 0.0040),
+            (center_lat - 0.0040, center_lon - 0.0040),
+        ]
+        access_mask = {
+            "roads": [
+                [(center_lat - 0.0050, center_lon), (center_lat + 0.0050, center_lon)]
+            ],
+            "parking_polygons": [
+                [
+                    (center_lat - 0.0004, center_lon - 0.0004),
+                    (center_lat - 0.0004, center_lon + 0.0004),
+                    (center_lat + 0.0004, center_lon + 0.0004),
+                    (center_lat + 0.0004, center_lon - 0.0004),
+                    (center_lat - 0.0004, center_lon - 0.0004),
+                ]
+            ],
+            "parking_points": [],
+        }
+
+        filtered = analysis._filter_driveable_grid_points(
+            points=points,
+            center_lat=center_lat,
+            center_lon=center_lon,
+            access_mask=access_mask,
+        )
+
+        self.assertIn((center_lat, center_lon), filtered)
+        self.assertEqual(len(filtered), 1)
 
 
 class TestSchemaValidation(unittest.TestCase):
