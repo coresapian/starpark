@@ -9,12 +9,30 @@ class IntelPanel {
         this.missionBrief = document.getElementById('mission-brief');
         this.missionBriefSection = document.getElementById('mission-brief-section');
         this.dataQualityDisplay = document.getElementById('data-quality-display');
+        this.gaugeCoverage = document.getElementById('gauge-coverage');
+        this.gaugeSnr = document.getElementById('gauge-snr');
+        this.gaugeTrack = document.getElementById('gauge-track');
+        this.gaugeCoverageValue = document.getElementById('gauge-coverage-value');
+        this.gaugeSnrValue = document.getElementById('gauge-snr-value');
+        this.gaugeTrackValue = document.getElementById('gauge-track-value');
+        this.dialDrift = document.getElementById('dial-drift');
+        this.dialLock = document.getElementById('dial-lock');
+        this.dialNoise = document.getElementById('dial-noise');
+        this.dialDriftValue = document.getElementById('dial-drift-value');
+        this.dialLockValue = document.getElementById('dial-lock-value');
+        this.dialNoiseValue = document.getElementById('dial-noise-value');
     }
 
     /**
      * Initialize panel.
      */
     init() {
+        this._setGauge(this.gaugeCoverage, this.gaugeCoverageValue, 0, '--%');
+        this._setGauge(this.gaugeSnr, this.gaugeSnrValue, 0, '-- dB');
+        this._setGauge(this.gaugeTrack, this.gaugeTrackValue, 0, '--');
+        this._setDial(this.dialDrift, this.dialDriftValue, 0, '--%');
+        this._setDial(this.dialLock, this.dialLockValue, 0, '--%');
+        this._setDial(this.dialNoise, this.dialNoiseValue, 0, '--%');
         return true;
     }
 
@@ -41,6 +59,7 @@ class IntelPanel {
 
         this.updateSatelliteList(data.satellites || []);
         this.updateDataQuality(data.data_quality || null);
+        this.updateInstrumentCluster(data);
     }
 
     /**
@@ -123,6 +142,84 @@ class IntelPanel {
                 '</li>'
             );
         }).join('');
+    }
+
+    /**
+     * Update animated gauge and dial readouts.
+     * @param {Object} data
+     */
+    updateInstrumentCluster(data = {}) {
+        const visibility = data.visibility || {};
+        const satellites = Array.isArray(data.satellites) ? data.satellites : [];
+
+        const fallbackVisible = satellites.filter((sat) => {
+            const isVisible = sat.visible ?? sat.is_visible ?? false;
+            const isObstructed = sat.obstructed ?? sat.is_obstructed ?? false;
+            return Boolean(isVisible) && !Boolean(isObstructed);
+        }).length;
+        const fallbackObstructed = satellites.filter((sat) => {
+            const isObstructed = sat.obstructed ?? sat.is_obstructed ?? false;
+            return Boolean(isObstructed);
+        }).length;
+
+        const total = Number(visibility.total_satellites ?? satellites.length ?? 0);
+        const visible = Number(visibility.visible_satellites ?? fallbackVisible);
+        const obstructed = Number(visibility.obstructed_satellites ?? fallbackObstructed);
+        const coveragePct = total > 0 ? (visible / total) * 100 : 0;
+
+        const snrValues = satellites
+            .map((sat) => Number(sat.snr))
+            .filter((value) => Number.isFinite(value));
+        const avgSnr = snrValues.length > 0
+            ? snrValues.reduce((sum, value) => sum + value, 0) / snrValues.length
+            : 0;
+
+        const trackLoadPct = Math.min(100, (total / 24) * 100);
+        const driftPct = total > 0 ? Math.min(100, (obstructed / total) * 100) : 0;
+        const lockPct = Math.max(0, Math.min(100, coveragePct * 0.75 + Math.min(100, avgSnr * 2) * 0.25));
+        const noisePct = Math.max(0, Math.min(100, 100 - Math.min(100, avgSnr * 2)));
+        const hasTelemetry = total > 0 || snrValues.length > 0;
+
+        this._setGauge(
+            this.gaugeCoverage,
+            this.gaugeCoverageValue,
+            coveragePct,
+            hasTelemetry ? `${Math.round(coveragePct)}%` : '--%'
+        );
+        this._setGauge(
+            this.gaugeSnr,
+            this.gaugeSnrValue,
+            Math.min(100, avgSnr * 2),
+            hasTelemetry ? `${Math.round(avgSnr)} dB` : '-- dB'
+        );
+        this._setGauge(
+            this.gaugeTrack,
+            this.gaugeTrackValue,
+            trackLoadPct,
+            hasTelemetry ? `${total}` : '--'
+        );
+
+        this._setDial(this.dialDrift, this.dialDriftValue, driftPct, hasTelemetry ? `${Math.round(driftPct)}%` : '--%');
+        this._setDial(this.dialLock, this.dialLockValue, lockPct, hasTelemetry ? `${Math.round(lockPct)}%` : '--%');
+        this._setDial(this.dialNoise, this.dialNoiseValue, noisePct, hasTelemetry ? `${Math.round(noisePct)}%` : '--%');
+    }
+
+    _setGauge(element, valueElement, percent, text) {
+        if (!element || !valueElement) return;
+        const clamped = Math.max(0, Math.min(100, Number(percent) || 0));
+        const fillAngle = 260 * (clamped / 100);
+        const needleAngle = -130 + fillAngle;
+        element.style.setProperty('--fill-angle', `${fillAngle.toFixed(2)}deg`);
+        element.style.setProperty('--needle-angle', `${needleAngle.toFixed(2)}deg`);
+        valueElement.textContent = text;
+    }
+
+    _setDial(element, valueElement, percent, text) {
+        if (!element || !valueElement) return;
+        const clamped = Math.max(0, Math.min(100, Number(percent) || 0));
+        const angle = -120 + (clamped * 2.4);
+        element.style.setProperty('--dial-angle', `${angle.toFixed(2)}deg`);
+        valueElement.textContent = text;
     }
 
     _statBlock(label, value) {

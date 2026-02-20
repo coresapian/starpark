@@ -53,6 +53,9 @@ body {
 
 .app-shell {
     position: relative;
+    --fx-speed: 1;
+    --fx-opacity: 1;
+    --fx-glow: 1;
     width: 100%;
     height: 100%;
     display: grid;
@@ -66,7 +69,77 @@ body {
     padding: 10px;
 }
 
+.app-shell[data-fx='low'] {
+    --fx-speed: 1.7;
+    --fx-opacity: 0.45;
+    --fx-glow: 0.72;
+}
+
+.app-shell[data-fx='medium'] {
+    --fx-speed: 1;
+    --fx-opacity: 1;
+    --fx-glow: 1;
+}
+
+.app-shell[data-fx='max'] {
+    --fx-speed: 0.68;
+    --fx-opacity: 1.3;
+    --fx-glow: 1.22;
+}
+
+.app-shell::before,
+.app-shell::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+.app-shell::before {
+    background:
+        repeating-linear-gradient(
+            180deg,
+            rgba(148, 163, 184, 0.08) 0px,
+            rgba(148, 163, 184, 0.08) 1px,
+            transparent 1px,
+            transparent 3px
+        ),
+        linear-gradient(90deg, rgba(56, 189, 248, 0.05), rgba(16, 185, 129, 0.03), rgba(56, 189, 248, 0.05));
+    mix-blend-mode: screen;
+    opacity: calc(0.34 * var(--fx-opacity));
+    z-index: 480;
+    animation: crt-roll calc(10s * var(--fx-speed)) linear infinite;
+}
+
+.app-shell::after {
+    background:
+        radial-gradient(130% 120% at 50% 50%, transparent 52%, rgba(2, 6, 23, 0.58) 100%),
+        radial-gradient(100% 100% at 50% -10%, rgba(56, 189, 248, 0.14), transparent 60%);
+    box-shadow:
+        inset 0 0 160px rgba(2, 6, 23, 0.5),
+        inset 0 0 0 1px rgba(56, 189, 248, 0.12);
+    opacity: calc(0.46 * var(--fx-opacity));
+    z-index: 481;
+    animation: crt-flicker calc(6.2s * var(--fx-speed)) linear infinite;
+}
+
+@keyframes crt-roll {
+    0% { background-position: 0 0, 0 0; }
+    100% { background-position: 0 120px, 18px 0; }
+}
+
+@keyframes crt-flicker {
+    0%, 18%, 55%, 100% { opacity: 0.42; }
+    6% { opacity: 0.5; }
+    36% { opacity: 0.36; }
+    66% { opacity: 0.48; }
+    84% { opacity: 0.38; }
+}
+
 .panel {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
     background: linear-gradient(180deg, rgba(12, 24, 44, 0.94), rgba(9, 17, 32, 0.94));
     border: 1px solid var(--line);
     border-radius: var(--radius);
@@ -77,7 +150,19 @@ body {
 .panel::before {
     content: '';
     position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background:
+        linear-gradient(130deg, rgba(56, 189, 248, 0.08) 0%, transparent 32%),
+        linear-gradient(320deg, rgba(45, 212, 191, 0.06) 0%, transparent 45%);
+    opacity: calc(0.6 * var(--fx-opacity));
+    animation: panel-shimmer calc(9s * var(--fx-speed)) linear infinite;
     pointer-events: none;
+}
+
+@keyframes panel-shimmer {
+    0% { transform: translateX(-18%); }
+    100% { transform: translateX(18%); }
 }
 
 .status-bar {
@@ -95,13 +180,90 @@ body {
     position: absolute;
     inset: 0;
     background: linear-gradient(110deg, transparent 0%, rgba(56, 189, 248, 0.08) 40%, transparent 70%);
-    animation: status-sweep 7s linear infinite;
+    animation: status-sweep calc(7s * var(--fx-speed)) linear infinite;
     pointer-events: none;
 }
 
 @keyframes status-sweep {
     0% { transform: translateX(-100%); }
     100% { transform: translateX(120%); }
+}
+
+.app-shell.threat-amber .status-bar {
+    border-color: #945f20;
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.35), var(--shadow);
+}
+
+.app-shell.threat-red .status-bar {
+    border-color: #7f1d1d;
+    box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.45), 0 0 24px rgba(127, 29, 29, 0.5);
+}
+
+.app-shell.threat-red .status-bar::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+        120deg,
+        rgba(254, 226, 226, 0.06) 0px,
+        rgba(254, 226, 226, 0.06) 8px,
+        transparent 8px,
+        transparent 16px
+    );
+    animation: alert-stripe calc(1.9s * var(--fx-speed)) linear infinite;
+}
+
+.app-shell.threat-amber .status-led[data-status='amber'],
+.app-shell.threat-red .status-led[data-status='red'] {
+    animation: led-alert calc(1.1s * var(--fx-speed)) ease-in-out infinite;
+}
+
+.app-shell.threat-red .status-title {
+    color: #fee2e2;
+    text-shadow: 0 0 10px rgba(248, 113, 113, 0.65);
+}
+
+.app-shell.threat-amber #instrument-panel,
+.app-shell.threat-amber .timeline-bar {
+    border-color: #7c4b15;
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.28), var(--shadow);
+}
+
+.app-shell.threat-red #instrument-panel,
+.app-shell.threat-red .timeline-bar {
+    border-color: #7f1d1d;
+    box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.34), 0 0 24px rgba(127, 29, 29, 0.45);
+    animation: threat-breath calc(1.8s * var(--fx-speed)) ease-in-out infinite;
+}
+
+.app-shell[data-fx='low']::before,
+.app-shell[data-fx='low']::after {
+    opacity: 0.14;
+}
+
+.app-shell[data-fx='low'] .status-bar::after {
+    opacity: 0.45;
+}
+
+.app-shell[data-fx='max']::before,
+.app-shell[data-fx='max']::after {
+    opacity: 0.58;
+}
+
+@keyframes led-alert {
+    0%, 100% { transform: scale(1); filter: brightness(1); }
+    50% { transform: scale(1.24); filter: brightness(1.28); }
+}
+
+@keyframes alert-stripe {
+    0% { transform: translateX(-12%); }
+    100% { transform: translateX(12%); }
+}
+
+@keyframes threat-breath {
+    0%, 100% { filter: saturate(1); }
+    50% { filter: saturate(1.22); }
 }
 
 .status-left,
@@ -185,6 +347,8 @@ body {
 
 .sidebar-tab {
     flex: 1;
+    position: relative;
+    overflow: hidden;
     height: 34px;
     border: 1px solid #2b475f;
     border-radius: 8px;
@@ -193,6 +357,21 @@ body {
     font-family: var(--font-mono);
     font-size: 12px;
     cursor: pointer;
+}
+
+.sidebar-tab::after {
+    content: '';
+    position: absolute;
+    inset: -45% -25%;
+    background: linear-gradient(105deg, transparent 40%, rgba(56, 189, 248, 0.24) 52%, transparent 64%);
+    transform: translateX(-130%) skewX(-18deg);
+    transition: transform calc(480ms * var(--fx-speed)) ease;
+    pointer-events: none;
+}
+
+.sidebar-tab:hover::after,
+.sidebar-tab.active::after {
+    transform: translateX(130%) skewX(-18deg);
 }
 
 .sidebar-tab.active {
@@ -213,11 +392,31 @@ body {
 
 .panel-label {
     display: block;
+    position: relative;
     font-family: var(--font-mono);
     font-size: 11px;
     letter-spacing: 0.08em;
     color: var(--text-dim);
     margin-bottom: 8px;
+    text-shadow: 0 0 8px rgba(56, 189, 248, 0.24);
+}
+
+.panel-label::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -2px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent 0%, rgba(45, 212, 191, 0.6) 50%, transparent 100%);
+    transform: scaleX(0.35);
+    transform-origin: center;
+    animation: label-sweep calc(4.4s * var(--fx-speed)) ease-in-out infinite;
+}
+
+@keyframes label-sweep {
+    0%, 100% { opacity: 0.35; transform: scaleX(0.3); }
+    50% { opacity: 0.8; transform: scaleX(1); }
 }
 
 .search-wrapper {
@@ -305,6 +504,8 @@ body {
 
 .tactical-btn {
     width: 100%;
+    position: relative;
+    overflow: hidden;
     min-height: 40px;
     display: inline-flex;
     align-items: center;
@@ -314,6 +515,20 @@ body {
     font-size: 12px;
     letter-spacing: 0.04em;
     text-transform: uppercase;
+}
+
+.tactical-btn::after {
+    content: '';
+    position: absolute;
+    inset: -38% -20%;
+    background: linear-gradient(115deg, transparent 42%, rgba(45, 212, 191, 0.3) 52%, transparent 62%);
+    transform: translateX(-140%) skewX(-18deg);
+    transition: transform calc(520ms * var(--fx-speed)) ease;
+    pointer-events: none;
+}
+
+.tactical-btn:hover::after {
+    transform: translateX(140%) skewX(-18deg);
 }
 
 .tactical-btn.accent {
@@ -354,7 +569,7 @@ body {
 .tactical-btn.loading,
 #gps-btn.loading,
 #route-plan-btn.loading {
-    animation: pulse 1s ease-in-out infinite;
+    animation: pulse calc(1s * var(--fx-speed)) ease-in-out infinite;
 }
 
 @keyframes pulse {
@@ -393,6 +608,51 @@ body {
 .action-stack {
     display: grid;
     gap: 8px;
+}
+
+.fx-panel {
+    margin-top: 4px;
+}
+
+.fx-toggle {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+}
+
+.fx-level-btn {
+    border: 1px solid #2b475f;
+    border-radius: 8px;
+    height: 34px;
+    background: linear-gradient(180deg, #081f36, #091629);
+    color: #9db5cc;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    transition: border-color calc(220ms * var(--fx-speed)) ease, box-shadow calc(220ms * var(--fx-speed)) ease, color calc(220ms * var(--fx-speed)) ease;
+}
+
+.fx-level-btn:hover {
+    border-color: #38bdf8;
+    color: #e2f3ff;
+}
+
+.fx-level-btn.active {
+    color: #cffafe;
+    border-color: #2dd4bf;
+    box-shadow: inset 0 0 0 1px rgba(45, 212, 191, 0.42), 0 0 14px rgba(45, 212, 191, 0.2);
+}
+
+.fx-level-btn[data-fx-level='low'].active {
+    border-color: #22c55e;
+    box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.4), 0 0 12px rgba(34, 197, 94, 0.2);
+}
+
+.fx-level-btn[data-fx-level='max'].active {
+    border-color: #38bdf8;
+    box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.45), 0 0 14px rgba(56, 189, 248, 0.28);
 }
 
 .terminal-input {
@@ -461,6 +721,56 @@ body {
     overflow: hidden;
     background: #1f2937;
     z-index: var(--z-map);
+}
+
+.map-viewport::before,
+.map-viewport::after {
+    content: '';
+    position: absolute;
+    pointer-events: none;
+}
+
+.map-viewport::before {
+    inset: -34% -40%;
+    background: conic-gradient(
+        from 0deg at 50% 50%,
+        transparent 0deg,
+        transparent 286deg,
+        rgba(34, 211, 238, 0.2) 324deg,
+        transparent 360deg
+    );
+    mix-blend-mode: screen;
+    opacity: calc(0.82 * var(--fx-opacity));
+    animation: map-reticle-spin calc(11s * var(--fx-speed)) linear infinite;
+    z-index: 550;
+}
+
+.map-viewport::after {
+    inset: 0;
+    background:
+        repeating-linear-gradient(180deg, rgba(56, 189, 248, 0.06) 0px, rgba(56, 189, 248, 0.06) 1px, transparent 1px, transparent 5px),
+        linear-gradient(180deg, transparent 0%, rgba(45, 212, 191, 0.14) 46%, rgba(45, 212, 191, 0.22) 50%, rgba(45, 212, 191, 0.14) 54%, transparent 100%);
+    background-size: 100% 6px, 100% 210%;
+    animation: map-scanline calc(7.5s * var(--fx-speed)) linear infinite;
+    opacity: calc(0.56 * var(--fx-opacity));
+    z-index: 551;
+}
+
+.app-shell[data-fx='low'] .map-viewport::before {
+    opacity: 0.2;
+}
+
+.app-shell[data-fx='low'] .map-viewport::after {
+    opacity: 0.24;
+}
+
+@keyframes map-reticle-spin {
+    to { transform: rotate(360deg); }
+}
+
+@keyframes map-scanline {
+    0% { background-position: 0 0, 0 -220%; }
+    100% { background-position: 0 0, 0 220%; }
 }
 
 .leaflet-container {
@@ -565,6 +875,8 @@ body {
 }
 
 .sky-plot-container {
+    position: relative;
+    overflow: hidden;
     display: flex;
     justify-content: center;
     align-items: center;
@@ -572,6 +884,36 @@ body {
     border-radius: 10px;
     background: radial-gradient(circle at 50% 40%, rgba(34, 197, 94, 0.1), rgba(2, 6, 23, 0.7));
     padding: 8px;
+}
+
+.sky-plot-container::before,
+.sky-plot-container::after {
+    content: '';
+    position: absolute;
+    pointer-events: none;
+}
+
+.sky-plot-container::before {
+    inset: 8px;
+    border-radius: 50%;
+    border: 1px dashed rgba(34, 211, 238, 0.5);
+    animation: orbit-drift calc(9s * var(--fx-speed)) linear infinite;
+}
+
+.sky-plot-container::after {
+    inset: 0;
+    background: linear-gradient(105deg, transparent 35%, rgba(56, 189, 248, 0.15) 50%, transparent 65%);
+    transform: translateX(-120%);
+    opacity: calc(0.9 * var(--fx-opacity));
+    animation: scope-sweep calc(6s * var(--fx-speed)) linear infinite;
+}
+
+@keyframes orbit-drift {
+    to { transform: rotate(360deg); }
+}
+
+@keyframes scope-sweep {
+    to { transform: translateX(120%); }
 }
 
 .sky-plot {
@@ -617,6 +959,234 @@ body {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 8px;
+}
+
+.instrument-panel {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid #24405a;
+    border-radius: 10px;
+    background: linear-gradient(180deg, rgba(8, 25, 47, 0.95), rgba(3, 12, 24, 0.96));
+    padding: 10px;
+}
+
+.instrument-panel::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(120deg, transparent 38%, rgba(56, 189, 248, 0.16) 50%, transparent 62%);
+    transform: translateX(-125%);
+    opacity: calc(0.95 * var(--fx-opacity));
+    animation: instrument-sweep calc(8.5s * var(--fx-speed)) linear infinite;
+    z-index: 0;
+}
+
+@keyframes instrument-sweep {
+    to { transform: translateX(125%); }
+}
+
+.instrument-gauges {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 9px;
+}
+
+.hud-gauge {
+    --fill-angle: 0deg;
+    --needle-angle: -130deg;
+    position: relative;
+    aspect-ratio: 1 / 1;
+    border-radius: 50%;
+    border: 1px solid #2d536f;
+    background:
+        radial-gradient(circle at center, rgba(6, 20, 34, 0.94) 0 36%, transparent 37%),
+        radial-gradient(circle at center, transparent 50%, rgba(56, 189, 248, 0.18) 70%, transparent 74%),
+        conic-gradient(
+            from -130deg,
+            rgba(45, 212, 191, 0.92) 0deg,
+            rgba(45, 212, 191, 0.92) var(--fill-angle),
+            rgba(25, 54, 76, 0.9) var(--fill-angle),
+            rgba(25, 54, 76, 0.9) 260deg,
+            rgba(9, 24, 40, 0.7) 260deg,
+            rgba(9, 24, 40, 0.7) 360deg
+        );
+    box-shadow:
+        inset 0 0 0 1px rgba(56, 189, 248, 0.18),
+        0 0 18px rgba(8, 145, 178, 0.22);
+}
+
+.hud-gauge::before {
+    content: '';
+    position: absolute;
+    inset: 8%;
+    border-radius: 50%;
+    border: 1px dashed rgba(34, 211, 238, 0.35);
+    animation: gauge-rotor calc(7.8s * var(--fx-speed)) linear infinite;
+}
+
+@keyframes gauge-rotor {
+    to { transform: rotate(360deg); }
+}
+
+.hud-gauge-needle {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 2px;
+    height: 37%;
+    border-radius: 999px;
+    background: linear-gradient(180deg, rgba(186, 230, 253, 0.98), rgba(34, 211, 238, 0.62));
+    transform-origin: 50% 88%;
+    transform: translate(-50%, -88%) rotate(var(--needle-angle));
+    transition: transform 420ms cubic-bezier(0.25, 1, 0.5, 1);
+    box-shadow: 0 0 9px rgba(34, 211, 238, 0.62);
+}
+
+.hud-gauge-needle::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    bottom: -3px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #cffafe;
+    transform: translateX(-50%);
+}
+
+.hud-gauge-value,
+.hud-gauge-name {
+    position: absolute;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-family: var(--font-mono);
+    pointer-events: none;
+}
+
+.hud-gauge-value {
+    top: 54%;
+    transform: translateY(-50%);
+    font-size: 12px;
+    color: #ccfbf1;
+    text-shadow: 0 0 8px rgba(34, 211, 238, 0.35);
+}
+
+.hud-gauge-name {
+    top: 74%;
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    color: #86a9c5;
+}
+
+.gizmo-strip {
+    position: relative;
+    z-index: 1;
+    margin-top: 10px;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.gizmo-dial {
+    --dial-angle: -120deg;
+    position: relative;
+    min-height: 80px;
+    border: 1px solid #2b475f;
+    border-radius: 9px;
+    background:
+        radial-gradient(circle at 50% 42%, rgba(15, 118, 110, 0.2), rgba(4, 11, 21, 0.92)),
+        linear-gradient(180deg, rgba(8, 25, 47, 0.95), rgba(3, 12, 22, 0.95));
+    overflow: hidden;
+}
+
+.gizmo-dial::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 48%;
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    border: 1px solid rgba(45, 212, 191, 0.42);
+    transform: translate(-50%, -50%);
+    box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.2);
+}
+
+.gizmo-dial::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 48%;
+    width: 2px;
+    height: 18px;
+    border-radius: 999px;
+    background: #67e8f9;
+    transform-origin: 50% 90%;
+    transform: translate(-50%, -86%) rotate(var(--dial-angle));
+    transition: transform 360ms ease;
+    box-shadow: 0 0 8px rgba(34, 211, 238, 0.62);
+}
+
+.gizmo-ring {
+    position: absolute;
+    left: 50%;
+    top: 48%;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    border: 1px dashed rgba(56, 189, 248, 0.33);
+    transform: translate(-50%, -50%);
+    animation: gizmo-spin calc(9s * var(--fx-speed)) linear infinite;
+}
+
+.gizmo-dial:nth-child(2) .gizmo-ring {
+    animation-duration: calc(6.4s * var(--fx-speed));
+    animation-direction: reverse;
+}
+
+.gizmo-dial:nth-child(3) .gizmo-ring {
+    animation-duration: calc(7.2s * var(--fx-speed));
+}
+
+.app-shell[data-fx='low'] .sky-plot-container::after,
+.app-shell[data-fx='low'] .instrument-panel::after {
+    opacity: 0.3;
+}
+
+.app-shell[data-fx='max'] .hud-gauge,
+.app-shell[data-fx='max'] .gizmo-dial {
+    filter: drop-shadow(0 0 calc(10px * var(--fx-glow)) rgba(14, 165, 233, 0.26));
+}
+
+@keyframes gizmo-spin {
+    to { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
+.gizmo-label,
+.gizmo-value {
+    position: absolute;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-family: var(--font-mono);
+}
+
+.gizmo-label {
+    top: 7px;
+    color: #85a6c0;
+    letter-spacing: 0.08em;
+    font-size: 9px;
+}
+
+.gizmo-value {
+    bottom: 8px;
+    color: #cffafe;
+    font-size: 11px;
+    text-shadow: 0 0 8px rgba(34, 211, 238, 0.4);
 }
 
 .stat-item {
@@ -1070,6 +1640,11 @@ body {
     .timeline-time,
     .timeline-date {
         justify-self: end;
+    }
+
+    .instrument-gauges,
+    .gizmo-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }
 

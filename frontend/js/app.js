@@ -16,6 +16,7 @@ class LinkSpotApp {
      * @param {Object} options.initialPosition - Initial map position {lat, lon, zoom}
      * @param {number} options.gridResolution - Heat map grid resolution in meters
      * @param {number} options.heatMapRadius - Default heat map radius in meters
+     * @param {'low'|'medium'|'max'} options.fxIntensity - Visual FX intensity preset
      */
     constructor(options = {}) {
         // Configuration
@@ -26,6 +27,7 @@ class LinkSpotApp {
             heatMapRadius: options.heatMapRadius || 500,
             routeSampleInterval: options.routeSampleInterval || 500,
             autoClearRouteOnDestinationChange: options.autoClearRouteOnDestinationChange ?? true,
+            fxIntensity: options.fxIntensity || 'medium',
             timeSliderStep: 15, // minutes
             animationInterval: 500 // ms between frames
         };
@@ -38,6 +40,8 @@ class LinkSpotApp {
             currentTimestamp: null,
             isPlaying: false,
             isLoading: false,
+            threatLevel: null,
+            fxIntensity: 'medium',
             gridLayer: null,
             buildingLayer: null,
             routeLayer: null,
@@ -69,6 +73,7 @@ class LinkSpotApp {
         this._lastToastKey = null;
         this._lastToastAt = 0;
         this._searchCache = new Map();
+        this._threatResetTimer = null;
         
         // DOM Elements cache
         this.elements = {};
@@ -93,6 +98,8 @@ class LinkSpotApp {
         
         // Cache DOM elements
         this.cacheElements();
+        this.initializeFXIntensityPreference();
+        this._setThreatLevel('normal', { force: true });
         this.initializeRouteAutoClearPreference();
         if (window.lucide && typeof window.lucide.createIcons === 'function') {
             window.lucide.createIcons();
@@ -142,9 +149,11 @@ class LinkSpotApp {
                 if (status.connected) {
                     this._hideBackendBanner();
                     if (this.statusBar) this.statusBar.updateLED('backend', 'green');
+                    this._setThreatLevel('normal');
                 } else {
                     this._showBackendBanner();
                     if (this.statusBar) this.statusBar.updateLED('backend', 'red');
+                    this._setThreatLevel('red');
                 }
 
                 if (this.statusBar && Array.isArray(status.components)) {
@@ -176,6 +185,7 @@ class LinkSpotApp {
      */
     cacheElements() {
         this.elements = {
+            shell: document.getElementById('app-shell'),
             map: document.getElementById('map'),
             loadingOverlay: document.getElementById('loading-overlay'),
             offlineIndicator: document.getElementById('offline-indicator'),
@@ -209,7 +219,8 @@ class LinkSpotApp {
             satelliteList: document.getElementById('satellite-list'),
             analysisStats: document.getElementById('analysis-stats'),
             toastContainer: document.getElementById('toast-container'),
-            scanAreaBtn: document.getElementById('scan-area-btn')
+            scanAreaBtn: document.getElementById('scan-area-btn'),
+            fxLevelButtons: Array.from(document.querySelectorAll('.fx-level-btn'))
         };
     }
     
@@ -280,8 +291,12 @@ class LinkSpotApp {
                 gridColor: 'rgba(45, 212, 191, 0.24)',
                 textColor: '#93c5fd',
                 cardinalColor: '#e2e8f0',
-                horizonColor: 'rgba(34, 197, 94, 0.7)'
+                horizonColor: 'rgba(34, 197, 94, 0.7)',
+                fxIntensity: this.state.fxIntensity
             });
+            if (typeof this.skyPlot.setFxIntensity === 'function') {
+                this.skyPlot.setFxIntensity(this.state.fxIntensity);
+            }
         }
     }
 
@@ -385,6 +400,14 @@ class LinkSpotApp {
                 } catch (_error) {
                     // Local storage may be unavailable.
                 }
+            });
+        }
+
+        if (Array.isArray(this.elements.fxLevelButtons)) {
+            this.elements.fxLevelButtons.forEach((button) => {
+                button.addEventListener('click', () => {
+                    this.setFXIntensity(button.dataset.fxLevel || 'medium');
+                });
             });
         }
 
@@ -516,8 +539,10 @@ class LinkSpotApp {
                     'warning',
                     5200
                 );
+                this._setThreatLevel('amber', { resetAfterMs: 3600 });
             } else {
                 this.showToast('Failed to load heat map data', 'error');
+                this._setThreatLevel('amber', { resetAfterMs: 4200 });
             }
             // Clear the request key so the user can retry
             this.state.lastHeatMapRequest = null;
@@ -643,6 +668,82 @@ class LinkSpotApp {
     }
 
     /**
+     * Initialize FX intensity from persisted preference.
+     */
+    initializeFXIntensityPreference() {
+        let level = this._normalizeFXIntensity(this.config.fxIntensity);
+
+        try {
+            const saved = localStorage.getItem('linkspot.ui.fxIntensity');
+            if (saved) {
+                level = this._normalizeFXIntensity(saved);
+            } else if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+                level = 'low';
+            }
+        } catch (_error) {
+            // Local storage may be unavailable.
+        }
+
+        this.setFXIntensity(level, { persist: false, silent: true });
+    }
+
+    /**
+     * Apply FX intensity to HUD overlays and radar visuals.
+     * @param {'low'|'medium'|'max'|string} level
+     * @param {{persist?: boolean, silent?: boolean}} [options]
+     */
+    setFXIntensity(level, options = {}) {
+        const normalized = this._normalizeFXIntensity(level);
+        const persist = options.persist !== false;
+        const silent = !!options.silent;
+
+        this.state.fxIntensity = normalized;
+
+        if (this.elements.shell) {
+            this.elements.shell.dataset.fx = normalized;
+        }
+
+        if (this.skyPlot && typeof this.skyPlot.setFxIntensity === 'function') {
+            this.skyPlot.setFxIntensity(normalized);
+        }
+
+        if (Array.isArray(this.elements.fxLevelButtons)) {
+            this.elements.fxLevelButtons.forEach((button) => {
+                const active = button.dataset.fxLevel === normalized;
+                button.classList.toggle('active', active);
+                button.setAttribute('aria-pressed', active ? 'true' : 'false');
+            });
+        }
+
+        if (persist) {
+            try {
+                localStorage.setItem('linkspot.ui.fxIntensity', normalized);
+            } catch (_error) {
+                // Local storage may be unavailable.
+            }
+        }
+
+        if (!silent) {
+            this.showToast(`FX intensity set to ${normalized.toUpperCase()}`, 'info', 1600);
+            if (this.effectsEngine && normalized === 'max') {
+                this.effectsEngine.glitch(this.elements.shell);
+            }
+        }
+    }
+
+    /**
+     * Normalize FX level values.
+     * @private
+     * @param {string} level
+     * @returns {'low'|'medium'|'max'}
+     */
+    _normalizeFXIntensity(level) {
+        const normalized = String(level || '').trim().toLowerCase();
+        if (normalized === 'low' || normalized === 'max') return normalized;
+        return 'medium';
+    }
+
+    /**
      * Initialize auto-clear toggle from persisted preference.
      */
     initializeRouteAutoClearPreference() {
@@ -708,6 +809,7 @@ class LinkSpotApp {
         this.elements.routeSummaryDeadZone.textContent = `${deadZonePct}%`;
         this.elements.routeSummaryWaypoints.textContent = `${waypointCount}`;
         this.elements.routeSummaryPanel.classList.remove('hidden');
+        this._updateThreatFromRoute(routePlan);
     }
 
     /**
@@ -800,6 +902,7 @@ class LinkSpotApp {
                 this.statusBar.updateLED('routing', 'green');
                 this.statusBar.updateFromDataQuality(routePlan.data_quality || null);
             }
+            this._updateThreatFromRoute(routePlan);
         } catch (error) {
             console.error('[LinkSpot] Route planning failed:', error);
             if (error instanceof APIError && error.status === 408) {
@@ -817,6 +920,7 @@ class LinkSpotApp {
             if (this.effectsEngine && this.elements.routePlanBtn) {
                 this.effectsEngine.glitch(this.elements.routePlanBtn);
             }
+            this._setThreatLevel('red', { resetAfterMs: 5200 });
         } finally {
             this._routeLoading = false;
             this._routeAbortController = null;
@@ -1498,6 +1602,8 @@ class LinkSpotApp {
                 </div>
             `;
         }
+
+        this._updateThreatFromAnalysis(analysis);
     }
     
     /**
@@ -1619,6 +1725,7 @@ class LinkSpotApp {
         this.elements.offlineIndicator.classList.remove('visible');
         this.showToast('Back online', 'success');
         if (this.effectsEngine) this.effectsEngine.signalLost(false);
+        this._setThreatLevel('normal');
     }
     
     /**
@@ -1629,6 +1736,7 @@ class LinkSpotApp {
         this.elements.offlineIndicator.classList.add('visible');
         this.showToast('You are offline', 'warning');
         if (this.effectsEngine) this.effectsEngine.signalLost(true);
+        this._setThreatLevel('red');
     }
     
     /**
@@ -1642,11 +1750,17 @@ class LinkSpotApp {
             if (this.statusBar) {
                 this.statusBar.updateLED('backend', 'green');
             }
+            if (!navigator.onLine) {
+                this._setThreatLevel('red');
+            } else {
+                this._setThreatLevel('normal');
+            }
         } catch (error) {
             this._showBackendBanner();
             if (this.statusBar) {
                 this.statusBar.updateLED('backend', 'red');
             }
+            this._setThreatLevel('red');
         }
     }
 
@@ -1694,6 +1808,118 @@ class LinkSpotApp {
         return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     }
 
+    /**
+     * Set tactical threat visuals on the shell.
+     * @private
+     * @param {'normal'|'amber'|'red'} level
+     * @param {{resetAfterMs?: number, force?: boolean}} [options]
+     */
+    _setThreatLevel(level = 'normal', options = {}) {
+        const shell = this.elements.shell || document.getElementById('app-shell');
+        if (!shell) return;
+
+        const force = !!options.force;
+        let normalized = ['normal', 'amber', 'red'].includes(level) ? level : 'normal';
+
+        if (!force && !navigator.onLine) {
+            normalized = 'red';
+        }
+        if (!force && document.getElementById('backend-banner')) {
+            normalized = 'red';
+        }
+
+        const previous = this.state.threatLevel ?? 'unknown';
+        const changed = previous !== normalized;
+
+        if (changed) {
+            shell.classList.toggle('threat-amber', normalized === 'amber');
+            shell.classList.toggle('threat-red', normalized === 'red');
+            shell.dataset.threat = normalized;
+
+            if (this.effectsEngine && this._threatRank(normalized) > this._threatRank(previous)) {
+                this.effectsEngine.glitch(shell);
+            }
+
+            this.state.threatLevel = normalized;
+        }
+
+        if (this._threatResetTimer) {
+            clearTimeout(this._threatResetTimer);
+            this._threatResetTimer = null;
+        }
+
+        if (normalized !== 'normal' && Number.isFinite(options.resetAfterMs) && options.resetAfterMs > 0) {
+            this._threatResetTimer = setTimeout(() => {
+                this._setThreatLevel('normal');
+            }, options.resetAfterMs);
+        }
+    }
+
+    /**
+     * Compute shell threat from visibility analysis.
+     * @private
+     * @param {Object} analysis
+     */
+    _updateThreatFromAnalysis(analysis) {
+        if (!analysis || !analysis.visibility) return;
+
+        const visibility = analysis.visibility || {};
+        const total = Number(visibility.total_satellites || 0);
+        const visible = Number(visibility.visible_satellites || 0);
+        const coverage = total > 0 ? (visible / total) * 100 : 0;
+        const warningCount = Array.isArray(analysis.data_quality?.warnings)
+            ? analysis.data_quality.warnings.length
+            : 0;
+
+        if (total <= 0 || coverage < 35 || warningCount >= 3) {
+            this._setThreatLevel('red');
+            return;
+        }
+
+        if (coverage < 65 || warningCount > 0) {
+            this._setThreatLevel('amber');
+            return;
+        }
+
+        this._setThreatLevel('normal');
+    }
+
+    /**
+     * Compute shell threat from route dead-zone density.
+     * @private
+     * @param {Object} routePlan
+     */
+    _updateThreatFromRoute(routePlan) {
+        const summary = routePlan?.mission_summary || {};
+        const totalDistance = Number(summary.total_distance_m || 0);
+        const deadZoneDistance = Number(summary.dead_zone_total_m || 0);
+        if (!Number.isFinite(totalDistance) || totalDistance <= 0) return;
+
+        const deadZonePct = (deadZoneDistance / totalDistance) * 100;
+        if (deadZonePct >= 35) {
+            this._setThreatLevel('red');
+            return;
+        }
+        if (deadZonePct >= 15) {
+            this._setThreatLevel('amber');
+            return;
+        }
+
+        this._setThreatLevel('normal');
+    }
+
+    /**
+     * Rank threat labels for escalation checks.
+     * @private
+     * @param {'normal'|'amber'|'red'} level
+     * @returns {number}
+     */
+    _threatRank(level) {
+        if (level === 'red') return 2;
+        if (level === 'amber') return 1;
+        return 0;
+    }
+
     // ============================================
     // CLEANUP
     // ============================================
@@ -1711,6 +1937,10 @@ class LinkSpotApp {
         if (this.state.searchAbortController) {
             this.state.searchAbortController.abort();
             this.state.searchAbortController = null;
+        }
+        if (this._threatResetTimer) {
+            clearTimeout(this._threatResetTimer);
+            this._threatResetTimer = null;
         }
 
         // Remove route overlays

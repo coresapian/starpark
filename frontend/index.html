@@ -24,7 +24,7 @@
     <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
-    <div class="app-shell" id="app-shell">
+    <div class="app-shell" id="app-shell" data-fx="medium" data-scene="eo" data-signal="clean">
         <header class="status-bar panel" id="status-bar">
             <div class="status-left">
                 <span class="status-led" id="led-backend" data-status="unknown"></span>
@@ -104,6 +104,24 @@
                         <span>Plan Route</span>
                     </button>
                 </section>
+
+                <section class="panel-section fx-panel" aria-label="Effects intensity controls">
+                    <label class="panel-label">FX INTENSITY</label>
+                    <div class="fx-toggle" role="group" aria-label="FX intensity">
+                        <button id="fx-low" class="fx-level-btn" data-fx-level="low" type="button" aria-pressed="false">LOW</button>
+                        <button id="fx-medium" class="fx-level-btn active" data-fx-level="medium" type="button" aria-pressed="true">MEDIUM</button>
+                        <button id="fx-max" class="fx-level-btn" data-fx-level="max" type="button" aria-pressed="false">MAX</button>
+                    </div>
+                </section>
+
+                <section class="panel-section scene-panel" aria-label="Scene mode controls">
+                    <label class="panel-label">CLASSIFIED INTEL</label>
+                    <div class="scene-toggle" role="group" aria-label="Scene mode">
+                        <button id="scene-eo" class="scene-mode-btn active" data-scene-mode="eo" type="button" aria-pressed="true">EO</button>
+                        <button id="scene-flir" class="scene-mode-btn" data-scene-mode="flir" type="button" aria-pressed="false">FLIR</button>
+                        <button id="scene-crt" class="scene-mode-btn" data-scene-mode="crt" type="button" aria-pressed="false">CRT</button>
+                    </div>
+                </section>
             </div>
 
             <div class="sidebar-panel hidden" id="tab-mission">
@@ -137,6 +155,13 @@
         </aside>
 
         <main id="map" class="map-viewport" role="main" aria-label="Satellite map"></main>
+        <div class="scene-reticle-overlay" id="scene-reticle-overlay" aria-hidden="true">
+            <span class="reticle-ring"></span>
+            <span class="reticle-ring reticle-ring-inner"></span>
+            <span class="reticle-crosshair reticle-crosshair-h"></span>
+            <span class="reticle-crosshair reticle-crosshair-v"></span>
+            <span class="reticle-pulse"></span>
+        </div>
 
         <aside class="intel-panel panel" id="intel-panel">
             <section class="panel-section route-summary-panel hidden" id="route-summary-panel" aria-live="polite">
@@ -188,6 +213,44 @@
             <section class="panel-section">
                 <label class="panel-label">ANALYSIS</label>
                 <div id="analysis-stats" class="analysis-stats"></div>
+            </section>
+
+            <section class="panel-section instrument-panel" id="instrument-panel" aria-live="polite">
+                <label class="panel-label">INSTRUMENT CLUSTER</label>
+                <div class="instrument-gauges">
+                    <div class="hud-gauge" id="gauge-coverage">
+                        <span class="hud-gauge-needle" aria-hidden="true"></span>
+                        <span class="hud-gauge-value" id="gauge-coverage-value">--%</span>
+                        <span class="hud-gauge-name">Coverage</span>
+                    </div>
+                    <div class="hud-gauge" id="gauge-snr">
+                        <span class="hud-gauge-needle" aria-hidden="true"></span>
+                        <span class="hud-gauge-value" id="gauge-snr-value">-- dB</span>
+                        <span class="hud-gauge-name">Signal</span>
+                    </div>
+                    <div class="hud-gauge" id="gauge-track">
+                        <span class="hud-gauge-needle" aria-hidden="true"></span>
+                        <span class="hud-gauge-value" id="gauge-track-value">--</span>
+                        <span class="hud-gauge-name">Tracked</span>
+                    </div>
+                </div>
+                <div class="gizmo-strip">
+                    <div class="gizmo-dial" id="dial-drift">
+                        <span class="gizmo-ring" aria-hidden="true"></span>
+                        <span class="gizmo-label">DRIFT</span>
+                        <span class="gizmo-value" id="dial-drift-value">--%</span>
+                    </div>
+                    <div class="gizmo-dial" id="dial-lock">
+                        <span class="gizmo-ring" aria-hidden="true"></span>
+                        <span class="gizmo-label">LOCK</span>
+                        <span class="gizmo-value" id="dial-lock-value">--%</span>
+                    </div>
+                    <div class="gizmo-dial" id="dial-noise">
+                        <span class="gizmo-ring" aria-hidden="true"></span>
+                        <span class="gizmo-label">NOISE</span>
+                        <span class="gizmo-value" id="dial-noise-value">--%</span>
+                    </div>
+                </div>
             </section>
 
             <section class="panel-section" id="data-quality-section">
@@ -250,6 +313,8 @@
             <i data-lucide="wifi-off"></i>
             <span>Offline Mode</span>
         </div>
+
+        <div id="signal-degrade" class="signal-degrade-overlay" aria-hidden="true"></div>
 
         <div id="signal-lost" class="signal-lost-overlay hidden">
             <span class="signal-lost-text">SIGNAL LOST</span>

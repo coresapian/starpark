@@ -92,15 +92,19 @@ class CommandPanel {
      * @param {Object} data
      */
     updateStats(data = {}) {
-        this._setText('stat-visible', `${data.visible_satellites ?? '--'}`);
-        this._setText('stat-obstructed', `${data.obstructed_satellites ?? '--'}`);
+        this._setMetric('stat-visible', data.visible_satellites, (value) => `${Math.round(value)}`);
+        this._setMetric('stat-obstructed', data.obstructed_satellites, (value) => `${Math.round(value)}`);
 
         if (Number.isFinite(data.coverage_pct)) {
-            this._setText('stat-coverage', `${Math.round(data.coverage_pct)}%`);
+            this._setMetric('stat-coverage', data.coverage_pct, (value) => `${Math.round(value)}%`);
+        } else {
+            this._setText('stat-coverage', '--');
         }
 
         if (data.status) {
             this._setText('stat-zone', String(data.status).toUpperCase());
+        } else {
+            this._setText('stat-zone', '--');
         }
     }
 
@@ -178,6 +182,28 @@ class CommandPanel {
     _setText(id, text) {
         const el = document.getElementById(id);
         if (el) el.textContent = text;
+    }
+
+    _setMetric(id, value, formatter) {
+        const el = document.getElementById(id);
+        if (!el) return;
+
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+            el.textContent = '--';
+            return;
+        }
+
+        const text = typeof formatter === 'function'
+            ? formatter(numeric)
+            : String(Math.round(numeric));
+
+        if (this.app && this.app.effectsEngine) {
+            this.app.effectsEngine.dataCascade(el, text, 360);
+            return;
+        }
+
+        el.textContent = text;
     }
 
     _escape(text) {

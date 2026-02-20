@@ -22,6 +22,7 @@ class SkyPlot {
      * @param {string} options.obstructionFill - Fill color for obstruction profile
      * @param {string} options.gridColor - Color for grid lines
      * @param {string} options.textColor - Color for labels
+     * @param {'low'|'medium'|'max'} [options.fxIntensity] - Render FX profile
      */
     constructor(canvas, options = {}) {
         this.canvas = canvas;
@@ -55,7 +56,9 @@ class SkyPlot {
             horizon: options.horizonColor || 'rgba(34, 197, 94, 0.72)',
             cardinal: options.cardinalColor || '#e2e8f0',
             sweep: options.sweepColor || 'rgba(34, 211, 238, 0.26)',
-            threat: options.threatColor || 'rgba(248, 113, 113, 0.5)'
+            threat: options.threatColor || 'rgba(248, 113, 113, 0.5)',
+            dial: options.dialColor || 'rgba(34, 211, 238, 0.42)',
+            lock: options.lockColor || 'rgba(186, 230, 253, 0.7)'
         };
         
         // Data storage
@@ -75,6 +78,12 @@ class SkyPlot {
         this.sweepAnimationId = null;
         this.sweepActive = true;
         this._lastSweepTick = 0;
+        this.fxIntensity = 'medium';
+        this.fxProfile = {
+            speedMultiplier: 1,
+            alphaMultiplier: 1,
+            detailMultiplier: 1
+        };
         this._visibilityHandler = () => {
             if (document.hidden) {
                 this.stopSweep();
@@ -82,6 +91,7 @@ class SkyPlot {
                 this.startSweep();
             }
         };
+        this.setFxIntensity(options.fxIntensity || 'medium');
         document.addEventListener('visibilitychange', this._visibilityHandler);
         this.startSweep();
     }
@@ -217,6 +227,44 @@ class SkyPlot {
             ctx.stroke();
         }
     }
+
+    /**
+     * Draw rotating dial ticks around the horizon ring.
+     * @private
+     */
+    drawReticleDial() {
+        const ctx = this.ctx;
+        const outerRadius = this.radius + 8 * this.dpr;
+        const phase = (this.sweepAngle - 90) * Math.PI / 180;
+        const pulse = 0.2 + (Math.sin(Date.now() / 360) + 1) * 0.14;
+
+        ctx.save();
+
+        ctx.strokeStyle = `rgba(34, 211, 238, ${0.18 + pulse})`;
+        ctx.lineWidth = 1 * this.dpr;
+        ctx.setLineDash([4 * this.dpr, 5 * this.dpr]);
+        ctx.beginPath();
+        ctx.arc(this.centerX, this.centerY, outerRadius, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        for (let i = 0; i < 16; i += 1) {
+            const angle = phase + (i * Math.PI / 8);
+            const tick = (i % 4 === 0 ? 12 : 7) * this.dpr;
+            const x1 = this.centerX + (outerRadius - tick) * Math.cos(angle);
+            const y1 = this.centerY + (outerRadius - tick) * Math.sin(angle);
+            const x2 = this.centerX + (outerRadius + 1.5 * this.dpr) * Math.cos(angle);
+            const y2 = this.centerY + (outerRadius + 1.5 * this.dpr) * Math.sin(angle);
+            ctx.strokeStyle = i === 0 ? this.colors.lock : this.colors.dial;
+            ctx.lineWidth = (i === 0 ? 2 : 1) * this.dpr;
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+        }
+
+        ctx.restore();
+    }
     
     /**
      * Draw obstruction profile
@@ -270,9 +318,9 @@ class SkyPlot {
         if (!this.obstructions || this.obstructions.length === 0) return;
 
         const ctx = this.ctx;
-        const pulse = 0.35 + (Math.sin(Date.now() / 260) + 1) * 0.2;
+        const pulse = (0.35 + (Math.sin(Date.now() / 260) + 1) * 0.2) * this.fxProfile.alphaMultiplier;
         let rendered = 0;
-        const maxThreatRings = 96;
+        const maxThreatRings = Math.max(24, Math.round(96 * this.fxProfile.detailMultiplier));
 
         this.obstructions.forEach((obs, index) => {
             if (!Number.isFinite(obs.elevation) || obs.elevation < 20) return;
@@ -285,9 +333,9 @@ class SkyPlot {
             const end = (obs.azimuth + 5 - 90) * Math.PI / 180;
 
             ctx.save();
-            ctx.fillStyle = `rgba(248, 113, 113, ${Math.min(0.58, pulse + 0.06)})`;
+            ctx.fillStyle = `rgba(248, 113, 113, ${Math.min(0.65, pulse + 0.06)})`;
             ctx.strokeStyle = this.colors.threat;
-            ctx.lineWidth = 1.5 * this.dpr;
+            ctx.lineWidth = (1.1 + 0.4 * this.fxProfile.detailMultiplier) * this.dpr;
             ctx.setLineDash(index % 2 === 0 ? [2 * this.dpr, 3 * this.dpr] : [1 * this.dpr, 4 * this.dpr]);
 
             ctx.beginPath();
@@ -315,7 +363,7 @@ class SkyPlot {
             if (!trail || trail.length < 2) return;
 
             ctx.save();
-            ctx.strokeStyle = 'rgba(45, 212, 191, 0.35)';
+            ctx.strokeStyle = `rgba(45, 212, 191, ${0.35 * this.fxProfile.alphaMultiplier})`;
             ctx.lineWidth = 1.4 * this.dpr;
             ctx.beginPath();
 
@@ -331,12 +379,48 @@ class SkyPlot {
     }
 
     /**
+     * Draw dynamic link arcs for satellites near current sweep heading.
+     * @private
+     */
+    drawLinkArcs() {
+        if (!this.satellites || this.satellites.length === 0) return;
+
+        const ctx = this.ctx;
+        const maxLinks = Math.max(8, Math.round(20 * this.fxProfile.detailMultiplier));
+        const lockCone = 24 + (24 * this.fxProfile.detailMultiplier);
+        const visible = this.satellites
+            .filter((sat) => sat.visible && !sat.obstructed)
+            .slice(0, maxLinks);
+
+        visible.forEach((sat, index) => {
+            const delta = Math.abs((((sat.azimuth - this.sweepAngle) % 360) + 540) % 360 - 180);
+            if (delta > lockCone) return;
+
+            const strength = 1 - (delta / lockCone);
+            const pos = this.polarToCartesian(sat.azimuth, sat.elevation);
+            const controlX = (this.centerX + pos.x) / 2;
+            const controlY = (this.centerY + pos.y) / 2 - (8 + (index % 4) * 2) * this.dpr;
+
+            ctx.save();
+            ctx.strokeStyle = `rgba(56, 189, 248, ${(0.08 + strength * 0.34) * this.fxProfile.alphaMultiplier})`;
+            ctx.lineWidth = (1 + strength * 1.3 * this.fxProfile.detailMultiplier) * this.dpr;
+            ctx.setLineDash(index % 2 === 0 ? [3 * this.dpr, 4 * this.dpr] : []);
+            ctx.beginPath();
+            ctx.moveTo(this.centerX, this.centerY);
+            ctx.quadraticCurveTo(controlX, controlY, pos.x, pos.y);
+            ctx.stroke();
+            ctx.restore();
+        });
+    }
+
+    /**
      * Draw rotating radar sweep line.
      * @private
      */
     drawRadarSweep() {
         const ctx = this.ctx;
-        const sweepStart = (this.sweepAngle - 14 - 90) * Math.PI / 180;
+        const sweepSpread = 8 + (8 * this.fxProfile.detailMultiplier);
+        const sweepStart = (this.sweepAngle - sweepSpread - 90) * Math.PI / 180;
         const sweepEnd = (this.sweepAngle - 90) * Math.PI / 180;
 
         ctx.save();
@@ -349,7 +433,7 @@ class SkyPlot {
             this.radius
         );
         grad.addColorStop(0, 'rgba(34, 211, 238, 0)');
-        grad.addColorStop(1, this.colors.sweep);
+        grad.addColorStop(1, `rgba(34, 211, 238, ${Math.min(0.4, 0.22 * this.fxProfile.alphaMultiplier)})`);
         ctx.fillStyle = grad;
         ctx.beginPath();
         ctx.moveTo(this.centerX, this.centerY);
@@ -358,8 +442,8 @@ class SkyPlot {
         ctx.fill();
 
         const end = this.polarToCartesian(this.sweepAngle, 0);
-        ctx.strokeStyle = 'rgba(34, 211, 238, 0.82)';
-        ctx.lineWidth = 2 * this.dpr;
+        ctx.strokeStyle = `rgba(34, 211, 238, ${Math.min(0.95, 0.6 + 0.25 * this.fxProfile.alphaMultiplier)})`;
+        ctx.lineWidth = (1.4 + (0.8 * this.fxProfile.detailMultiplier)) * this.dpr;
         ctx.beginPath();
         ctx.moveTo(this.centerX, this.centerY);
         ctx.lineTo(end.x, end.y);
@@ -375,6 +459,7 @@ class SkyPlot {
         if (!this.satellites || this.satellites.length === 0) return;
         
         const ctx = this.ctx;
+        const now = Date.now();
         
         this.satellites.forEach(sat => {
             const pos = this.polarToCartesian(sat.azimuth, sat.elevation);
@@ -388,9 +473,10 @@ class SkyPlot {
             
             // Add glow effect for visible satellites
             if (isVisible) {
+                const pulseRadius = (9 + ((Math.sin((now / 280) + sat.azimuth) + 1) * 1.6 * this.fxProfile.detailMultiplier)) * this.dpr;
                 ctx.beginPath();
-                ctx.arc(pos.x, pos.y, 10 * this.dpr, 0, Math.PI * 2);
-                ctx.fillStyle = 'rgba(45, 212, 191, 0.28)';
+                ctx.arc(pos.x, pos.y, pulseRadius, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(45, 212, 191, ${Math.min(0.55, 0.28 * this.fxProfile.alphaMultiplier)})`;
                 ctx.fill();
             }
             
@@ -419,6 +505,47 @@ class SkyPlot {
             }
         });
     }
+
+    /**
+     * Draw pulsing zenith marker at center of plot.
+     * @private
+     */
+    drawZenithPulse() {
+        const ctx = this.ctx;
+        const pulse = (Math.sin(Date.now() / 420) + 1) / 2;
+        const radius = (3 + pulse * (2.5 * this.fxProfile.detailMultiplier)) * this.dpr;
+
+        ctx.save();
+        ctx.fillStyle = `rgba(165, 243, 252, ${Math.min(0.95, 0.72 + 0.18 * this.fxProfile.alphaMultiplier)})`;
+        ctx.beginPath();
+        ctx.arc(this.centerX, this.centerY, radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        const strokeAlpha = Math.min(0.9, (0.3 + pulse * 0.35) * this.fxProfile.alphaMultiplier);
+        ctx.strokeStyle = `rgba(34, 211, 238, ${strokeAlpha})`;
+        ctx.lineWidth = 1.4 * this.dpr;
+        ctx.beginPath();
+        ctx.arc(this.centerX, this.centerY, radius + (6 * this.dpr), 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    /**
+     * Set render effects intensity for radar animation.
+     * @param {'low'|'medium'|'max'|string} level
+     */
+    setFxIntensity(level = 'medium') {
+        const normalized = String(level || '').toLowerCase();
+        const profiles = {
+            low: { speedMultiplier: 0.56, alphaMultiplier: 0.55, detailMultiplier: 0.65 },
+            medium: { speedMultiplier: 1, alphaMultiplier: 1, detailMultiplier: 1 },
+            max: { speedMultiplier: 1.55, alphaMultiplier: 1.28, detailMultiplier: 1.3 }
+        };
+
+        this.fxIntensity = normalized === 'low' || normalized === 'max' ? normalized : 'medium';
+        this.fxProfile = profiles[this.fxIntensity];
+        this.draw();
+    }
     
     /**
      * Draw the complete sky plot
@@ -426,10 +553,13 @@ class SkyPlot {
     draw() {
         this.clear();
         this.drawGrid();
+        this.drawReticleDial();
         this.drawThreatRings();
         this.drawObstructions();
         this.drawSatelliteTrails();
+        this.drawLinkArcs();
         this.drawSatellites();
+        this.drawZenithPulse();
         this.drawRadarSweep();
     }
     
@@ -559,7 +689,7 @@ class SkyPlot {
             if (!this._lastSweepTick) this._lastSweepTick = ts;
             const delta = ts - this._lastSweepTick;
             this._lastSweepTick = ts;
-            this.sweepAngle = (this.sweepAngle + (delta * 0.045)) % 360;
+            this.sweepAngle = (this.sweepAngle + (delta * 0.045 * this.fxProfile.speedMultiplier)) % 360;
             this.draw();
             this.sweepAnimationId = requestAnimationFrame(animate);
         };
