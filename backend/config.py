@@ -97,6 +97,34 @@ class Settings(BaseSettings):
         default=10.0,
         description="Minimum elevation angle for satellite visibility",
     )
+    spacetrack_identity: Optional[str] = Field(
+        default=None,
+        description="Space-Track login identity (username/email)",
+    )
+    spacetrack_password: Optional[str] = Field(
+        default=None,
+        description="Space-Track login password",
+    )
+    spacetrack_gp_min_interval_seconds: int = Field(
+        default=3600,
+        ge=60,
+        description="Minimum interval between GP/TLE pulls from Space-Track",
+    )
+    spacetrack_rate_limit_per_minute: int = Field(
+        default=30,
+        ge=1,
+        description="Maximum Space-Track requests per minute",
+    )
+    spacetrack_rate_limit_per_hour: int = Field(
+        default=300,
+        ge=1,
+        description="Maximum Space-Track requests per hour",
+    )
+    spacetrack_http_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        description="Space-Track HTTP request timeout",
+    )
     tle_update_interval_hours: int = Field(
         default=6,
         description="TLE data update interval in hours",
@@ -104,6 +132,11 @@ class Settings(BaseSettings):
     max_satellites_per_query: int = Field(
         default=1000,
         description="Maximum satellites to return per query",
+    )
+    max_constellation_map_satellites: int = Field(
+        default=12000,
+        ge=100,
+        description="Maximum satellites returned for constellation map overlays",
     )
 
     # Obstruction Engine

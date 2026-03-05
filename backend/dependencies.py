@@ -64,6 +64,9 @@ class _NoopSyncRedis:
     def get(self, _key: str) -> None:
         return None
 
+    def ttl(self, _key: str) -> int:
+        return -2
+
     def setex(self, _key: str, _ttl: int, _value: bytes | str) -> bool:
         return False
 
@@ -232,7 +235,7 @@ async def get_db_transaction() -> AsyncGenerator[asyncpg.Connection, None]:
 async def get_satellite_engine() -> Any:
     """Get or initialize satellite engine singleton.
 
-    Uses real SatelliteEngine (CelesTrak TLE data + Skyfield).
+    Uses real SatelliteEngine (Space-Track GP preferred, CelesTrak fallback).
     """
     global _satellite_engine
 
@@ -240,7 +243,9 @@ async def get_satellite_engine() -> Any:
         sync_redis = _get_sync_redis()
         try:
             _satellite_engine = _SatelliteEngineAdapter(sync_redis)
-            logger.info("Satellite engine initialized (real — CelesTrak/Skyfield)")
+            logger.info(
+                "Satellite engine initialized (real — Space-Track/CelesTrak + Skyfield)"
+            )
         except Exception as e:
             logger.warning(
                 "Satellite engine unavailable; using degraded fallback: %s", e
@@ -276,7 +281,15 @@ class _SatelliteEngineAdapter:
     def __init__(self, sync_redis):
         from satellite_engine import SatelliteEngine
 
-        self._engine = SatelliteEngine(sync_redis)
+        self._engine = SatelliteEngine(
+            sync_redis,
+            space_track_identity=settings.spacetrack_identity,
+            space_track_password=settings.spacetrack_password,
+            space_track_min_interval_seconds=settings.spacetrack_gp_min_interval_seconds,
+            space_track_per_minute_limit=settings.spacetrack_rate_limit_per_minute,
+            space_track_per_hour_limit=settings.spacetrack_rate_limit_per_hour,
+            space_track_timeout_seconds=settings.spacetrack_http_timeout_seconds,
+        )
         self._engine.fetch_tle_data()
         logger.info(f"Loaded {len(self._engine._satellites)} satellites from TLE data")
         # TODO: Move TLE refresh to a background updater to prevent stale ephemeris during long-lived sessions.
@@ -301,10 +314,16 @@ class _SatelliteEngineAdapter:
         return [
             {
                 "satellite_id": p.satellite_id,
+                "norad_id": p.norad_id,
                 "name": p.name,
                 "azimuth": p.azimuth,
                 "elevation": p.elevation,
                 "range_km": p.range_km,
+                "latitude": p.latitude,
+                "longitude": p.longitude,
+                "altitude_km": p.altitude_km,
+                "velocity_kms": p.velocity_kms,
+                "constellation": p.constellation,
                 "is_visible": p.is_visible,
             }
             for p in positions
@@ -313,6 +332,22 @@ class _SatelliteEngineAdapter:
     async def get_constellations(self) -> list[dict]:
         metadata = await asyncio.to_thread(self._engine.get_constellation_metadata)
         return [metadata]
+
+    async def get_constellation_map_positions(
+        self,
+        timestamp: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> dict[str, Any]:
+        positions = await asyncio.to_thread(
+            self._engine.get_constellation_positions,
+            timestamp,
+            limit,
+        )
+        source = await asyncio.to_thread(self._engine.get_tle_source)
+        return {
+            "satellites": positions,
+            "source": source,
+        }
 
 
 class _FallbackSatelliteEngine:
@@ -332,6 +367,18 @@ class _FallbackSatelliteEngine:
 
     async def get_constellations(self) -> list[dict]:
         return [{"name": "unavailable", "status": "degraded", "reason": self._reason}]
+
+    async def get_constellation_map_positions(
+        self,
+        timestamp: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> dict[str, Any]:
+        _ = timestamp
+        _ = limit
+        return {
+            "satellites": [],
+            "source": f"degraded:{self._reason}",
+        }
 
 
 # ============================================================================

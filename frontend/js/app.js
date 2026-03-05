@@ -55,7 +55,10 @@ class LinkSpotApp {
             lastHeatMapRequest: null,
             lastScannedCenter: null,
             destinationMarker: null,
-            locationMarker: null
+            locationMarker: null,
+            constellationLayer: null,
+            constellationSatellites: [],
+            constellationLastUpdated: null
         };
         
         // API Client
@@ -74,6 +77,10 @@ class LinkSpotApp {
         this._lastToastAt = 0;
         this._searchCache = new Map();
         this._threatResetTimer = null;
+        this._backendBootstrapAttempted = false;
+        this._backendBootstrapInProgress = false;
+        this._constellationLoading = false;
+        this._constellationRefreshTimer = null;
         
         // DOM Elements cache
         this.elements = {};
@@ -139,6 +146,9 @@ class LinkSpotApp {
                 this.state.currentPosition.lon
             );
         }
+
+        await this.loadConstellationMap({ silent: true });
+        this.startConstellationRefreshLoop();
         
         // Hide loading overlay
         this.setLoading(false);
@@ -150,10 +160,13 @@ class LinkSpotApp {
                     this._hideBackendBanner();
                     if (this.statusBar) this.statusBar.updateLED('backend', 'green');
                     this._setThreatLevel('normal');
+                    this.loadConstellationMap({ silent: true });
+                    this.startConstellationRefreshLoop();
                 } else {
                     this._showBackendBanner();
                     if (this.statusBar) this.statusBar.updateLED('backend', 'red');
                     this._setThreatLevel('red');
+                    this.stopConstellationRefreshLoop();
                 }
 
                 if (this.statusBar && Array.isArray(status.components)) {
@@ -257,22 +270,25 @@ class LinkSpotApp {
 
         // Show "Scan this area" button when map pans away from last scan
         this.state.map.on('moveend', () => {
-            if (!this.state.currentPosition) return;
             const center = this.state.map.getCenter();
-            this.state.currentPosition = { lat: center.lat, lon: center.lng };
-            this.updateRoutePlanButtonState();
+            if (this.state.currentPosition) {
+                this.state.currentPosition = { lat: center.lat, lon: center.lng };
+                this.updateRoutePlanButtonState();
 
-            if (this.state.lastScannedCenter) {
-                const dist = this._haversineDistance(
-                    this.state.lastScannedCenter.lat, this.state.lastScannedCenter.lon,
-                    center.lat, center.lng
-                );
-                if (dist > this.config.heatMapRadius * 0.25) {
-                    this.elements.scanAreaBtn.classList.remove('hidden');
-                } else {
-                    this.elements.scanAreaBtn.classList.add('hidden');
+                if (this.state.lastScannedCenter) {
+                    const dist = this._haversineDistance(
+                        this.state.lastScannedCenter.lat, this.state.lastScannedCenter.lon,
+                        center.lat, center.lng
+                    );
+                    if (dist > this.config.heatMapRadius * 0.25) {
+                        this.elements.scanAreaBtn.classList.remove('hidden');
+                    } else {
+                        this.elements.scanAreaBtn.classList.add('hidden');
+                    }
                 }
             }
+
+            this.renderConstellationViewport();
         });
         // TODO: Debounce moveend updates to prevent flicker and repeated DOM work on high-frequency pans.
     }
@@ -488,6 +504,15 @@ class LinkSpotApp {
                 this.centerOnGPS();
             });
         }
+
+        if (typeof window.electronAPI.onBackendBootstrapStatus === 'function') {
+            window.electronAPI.onBackendBootstrapStatus((payload) => {
+                this._updateBackendBootstrapStatus(payload.message || 'Starting local backend…');
+                if (payload.phase === 'ready' || payload.phase === 'error') {
+                    this._backendBootstrapInProgress = false;
+                }
+            });
+        }
     }
     
     // ============================================
@@ -625,6 +650,127 @@ class LinkSpotApp {
         // Ensure buildings are below grid cells
         if (this.state.gridLayer) {
             this.state.buildingLayer.bringToBack();
+        }
+    }
+
+    /**
+     * Start periodic constellation refreshes.
+     */
+    startConstellationRefreshLoop() {
+        this.stopConstellationRefreshLoop();
+        this._constellationRefreshTimer = setInterval(() => {
+            this.loadConstellationMap({ silent: true });
+        }, 60000);
+    }
+
+    /**
+     * Stop periodic constellation refreshes.
+     */
+    stopConstellationRefreshLoop() {
+        if (!this._constellationRefreshTimer) return;
+        clearInterval(this._constellationRefreshTimer);
+        this._constellationRefreshTimer = null;
+    }
+
+    /**
+     * Load Starlink constellation map points from backend.
+     * @param {{silent?: boolean}} [options]
+     */
+    async loadConstellationMap(options = {}) {
+        if (!this.state.map || this._constellationLoading) return;
+
+        const silent = !!options.silent;
+        this._constellationLoading = true;
+        try {
+            const payload = await this.api.getConstellationMap(this.state.currentTimestamp, 12000);
+            const satellites = Array.isArray(payload?.satellites) ? payload.satellites : [];
+            this.state.constellationSatellites = satellites.filter((sat) => {
+                const lat = Number(sat.latitude);
+                const lon = Number(sat.longitude);
+                return Number.isFinite(lat) && Number.isFinite(lon);
+            });
+            this.state.constellationLastUpdated = payload?.timestamp || new Date().toISOString();
+            this.renderConstellationViewport();
+
+            if (this.statusBar) {
+                this.statusBar.updateLED('satellites', 'green');
+            }
+        } catch (error) {
+            if (this.statusBar) {
+                this.statusBar.updateLED('satellites', 'amber');
+            }
+            if (!silent) {
+                this.showToast('Unable to load Starlink constellation map', 'warning', 3200);
+            }
+        } finally {
+            this._constellationLoading = false;
+        }
+    }
+
+    /**
+     * Render constellation satellites for the current map viewport.
+     */
+    renderConstellationViewport() {
+        if (!this.state.map) return;
+
+        if (!this.state.constellationLayer) {
+            this.state.constellationLayer = L.featureGroup().addTo(this.state.map);
+        }
+        this.state.constellationLayer.clearLayers();
+
+        const allSatellites = Array.isArray(this.state.constellationSatellites)
+            ? this.state.constellationSatellites
+            : [];
+        if (allSatellites.length === 0) return;
+
+        const bounds = this.state.map.getBounds().pad(0.35);
+        const west = bounds.getWest();
+        const east = bounds.getEast();
+        const south = bounds.getSouth();
+        const north = bounds.getNorth();
+        const crossesDateLine = west > east;
+
+        const inView = allSatellites.filter((sat) => {
+            const lat = Number(sat.latitude);
+            const lon = Number(sat.longitude);
+            if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+            if (lat < south || lat > north) return false;
+            if (!crossesDateLine) return lon >= west && lon <= east;
+            return lon >= west || lon <= east;
+        });
+
+        if (inView.length === 0) return;
+
+        const zoom = this.state.map.getZoom();
+        const maxMarkers = zoom <= 3 ? 800 : (zoom <= 5 ? 1800 : 3200);
+        const stride = Math.max(1, Math.ceil(inView.length / maxMarkers));
+        const markerRadius = zoom >= 8 ? 3.4 : (zoom >= 5 ? 2.8 : 2.3);
+
+        for (let index = 0; index < inView.length; index += stride) {
+            const sat = inView[index];
+            const marker = L.circleMarker([sat.latitude, sat.longitude], {
+                radius: markerRadius,
+                color: '#f8fafc',
+                weight: 0.8,
+                fillColor: '#fbbf24',
+                fillOpacity: 0.9,
+                opacity: 0.9
+            });
+
+            if (zoom >= 6 && index % (stride * 4) === 0) {
+                const label = sat.name || sat.satellite_id || 'Starlink';
+                marker.bindTooltip(`* ${this.escapeHtml(String(label))}`, {
+                    direction: 'top',
+                    offset: [0, -4],
+                    className: 'constellation-tooltip'
+                });
+            }
+
+            marker.addTo(this.state.constellationLayer);
+        }
+
+        if (typeof this.state.constellationLayer.bringToFront === 'function') {
+            this.state.constellationLayer.bringToFront();
         }
     }
 
@@ -1726,6 +1872,8 @@ class LinkSpotApp {
         this.showToast('Back online', 'success');
         if (this.effectsEngine) this.effectsEngine.signalLost(false);
         this._setThreatLevel('normal');
+        this.loadConstellationMap({ silent: true });
+        this.startConstellationRefreshLoop();
     }
     
     /**
@@ -1737,6 +1885,7 @@ class LinkSpotApp {
         this.showToast('You are offline', 'warning');
         if (this.effectsEngine) this.effectsEngine.signalLost(true);
         this._setThreatLevel('red');
+        this.stopConstellationRefreshLoop();
     }
     
     /**
@@ -1755,6 +1904,7 @@ class LinkSpotApp {
             } else {
                 this._setThreatLevel('normal');
             }
+            this.loadConstellationMap({ silent: true });
         } catch (error) {
             this._showBackendBanner();
             if (this.statusBar) {
@@ -1767,31 +1917,135 @@ class LinkSpotApp {
     /** @private */
     _showBackendBanner() {
         let banner = document.getElementById('backend-banner');
-        if (banner) return;
-        banner = document.createElement('div');
-        banner.id = 'backend-banner';
-        banner.className = 'backend-banner';
-
         const isElectron = window.electronAPI && window.electronAPI.isElectron;
+        const canBootstrapLocal = isElectron && typeof window.electronAPI.startLocalBackend === 'function';
         const message = isElectron
-            ? 'Backend unavailable. Start the backend with <code>make up</code> or update the URL in Preferences.'
+            ? 'Backend unavailable. LinkSpot can auto-start Docker + backend, or use a custom URL in Preferences.'
             : 'Backend unavailable. Ensure the server is running.';
 
-        banner.innerHTML =
-            '<span class="backend-banner-icon">&#9888;</span>' +
-            '<span class="backend-banner-text">' + message + '</span>' +
-            '<button class="backend-banner-retry" id="backend-retry-btn">Retry</button>' +
-            '<button class="backend-banner-close" id="backend-close-btn" aria-label="Dismiss">&times;</button>';
-        document.body.prepend(banner);
+        if (!banner) {
+            banner = document.createElement('div');
+            banner.id = 'backend-banner';
+            banner.className = 'backend-banner';
 
-        document.getElementById('backend-retry-btn').addEventListener('click', () => this.checkBackendHealth());
-        document.getElementById('backend-close-btn').addEventListener('click', () => banner.remove());
+            banner.innerHTML =
+                '<span class="backend-banner-icon">&#9888;</span>' +
+                '<span class="backend-banner-text">' + message + '</span>' +
+                '<span class="backend-banner-status" id="backend-bootstrap-status"></span>' +
+                '<div class="backend-banner-actions">' +
+                    (canBootstrapLocal
+                        ? '<button class="backend-banner-start" id="backend-start-btn">Start Local Backend</button>'
+                        : '') +
+                    '<button class="backend-banner-retry" id="backend-retry-btn">Retry</button>' +
+                    '<button class="backend-banner-close" id="backend-close-btn" aria-label="Dismiss">&times;</button>' +
+                '</div>';
+            document.body.prepend(banner);
+
+            const retryButton = document.getElementById('backend-retry-btn');
+            if (retryButton) {
+                retryButton.addEventListener('click', () => this.checkBackendHealth());
+            }
+
+            const closeButton = document.getElementById('backend-close-btn');
+            if (closeButton) {
+                closeButton.addEventListener('click', () => banner.remove());
+            }
+
+            const startButton = document.getElementById('backend-start-btn');
+            if (startButton) {
+                startButton.addEventListener('click', () => {
+                    this.startLocalBackend();
+                });
+            }
+        }
+
+        this._setBackendBootstrapBusy(this._backendBootstrapInProgress);
+        if (canBootstrapLocal && !this._backendBootstrapAttempted && !this._backendBootstrapInProgress) {
+            this.startLocalBackend({ automatic: true });
+        }
     }
 
     /** @private */
     _hideBackendBanner() {
         const banner = document.getElementById('backend-banner');
         if (banner) banner.remove();
+    }
+
+    /**
+     * Start the local Docker backend via Electron bridge.
+     * @param {{automatic?: boolean}} [options]
+     */
+    async startLocalBackend(options = {}) {
+        if (!window.electronAPI || typeof window.electronAPI.startLocalBackend !== 'function') {
+            return;
+        }
+
+        const automatic = !!options.automatic;
+        if (automatic && this._backendBootstrapAttempted) {
+            return;
+        }
+        if (this._backendBootstrapInProgress) {
+            return;
+        }
+
+        if (automatic) {
+            this._backendBootstrapAttempted = true;
+        }
+
+        this._backendBootstrapInProgress = true;
+        this._setBackendBootstrapBusy(true);
+        this._updateBackendBootstrapStatus('Starting local backend…');
+
+        try {
+            const result = await window.electronAPI.startLocalBackend();
+            if (result && result.success) {
+                this._updateBackendBootstrapStatus('Local backend online.');
+                this.showToast('Local backend is online', 'success', 2000);
+                await this.checkBackendHealth();
+                return;
+            }
+
+            const error = result && result.error
+                ? result.error
+                : 'Failed to start local backend.';
+            this._updateBackendBootstrapStatus(error);
+            if (!automatic || !result || !result.skipped) {
+                this.showToast(error, 'error', 5200);
+            }
+        } catch (error) {
+            const message = error && error.message ? error.message : 'Failed to start local backend.';
+            this._updateBackendBootstrapStatus(message);
+            this.showToast(message, 'error', 5200);
+        } finally {
+            this._backendBootstrapInProgress = false;
+            this._setBackendBootstrapBusy(false);
+        }
+    }
+
+    /**
+     * Update backend bootstrap status text in banner.
+     * @private
+     * @param {string} message
+     */
+    _updateBackendBootstrapStatus(message) {
+        const status = document.getElementById('backend-bootstrap-status');
+        if (!status) return;
+
+        const text = String(message || '').trim();
+        status.textContent = text;
+        status.classList.toggle('visible', text.length > 0);
+    }
+
+    /**
+     * Toggle local backend button busy state.
+     * @private
+     * @param {boolean} busy
+     */
+    _setBackendBootstrapBusy(busy) {
+        const startButton = document.getElementById('backend-start-btn');
+        if (!startButton) return;
+        startButton.disabled = !!busy;
+        startButton.textContent = busy ? 'Starting…' : 'Start Local Backend';
     }
 
     /**
@@ -1930,6 +2184,7 @@ class LinkSpotApp {
     destroy() {
         // Stop animation
         this.stopAnimation();
+        this.stopConstellationRefreshLoop();
         if (this._routeAbortController) {
             this._routeAbortController.abort();
             this._routeAbortController = null;
@@ -1960,6 +2215,10 @@ class LinkSpotApp {
         
         // Destroy map
         if (this.state.map) {
+            if (this.state.constellationLayer) {
+                this.state.map.removeLayer(this.state.constellationLayer);
+                this.state.constellationLayer = null;
+            }
             if (this.state.destinationMarker) {
                 this.state.map.removeLayer(this.state.destinationMarker);
                 this.state.destinationMarker = null;

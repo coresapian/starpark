@@ -30,10 +30,11 @@ from routers import analysis, health, route, satellites
 # Logging Configuration
 # ============================================================================
 
+
 def configure_logging() -> None:
     """Configure structured logging for the application."""
     log_level = getattr(logging, settings.log_level)
-    
+
     # Configure root logger
     logging.basicConfig(
         level=log_level,
@@ -42,16 +43,17 @@ def configure_logging() -> None:
             logging.StreamHandler(sys.stdout),
         ],
     )
-    
+
     # Set specific log levels
     logging.getLogger("uvicorn").setLevel(logging.INFO)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-    
+
     # Configure JSON logging if requested
     if settings.log_format == "json":
+
         class JSONFormatter(logging.Formatter):
             """JSON log formatter for structured logging."""
-            
+
             def format(self, record: logging.LogRecord) -> str:
                 log_data = {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -59,7 +61,7 @@ def configure_logging() -> None:
                     "logger": record.name,
                     "message": record.getMessage(),
                 }
-                
+
                 # Add extra fields if present
                 if hasattr(record, "request_id"):
                     log_data["request_id"] = record.request_id
@@ -75,9 +77,9 @@ def configure_logging() -> None:
                     log_data["client_ip"] = record.client_ip
                 if record.exc_info:
                     log_data["exception"] = self.formatException(record.exc_info)
-                
+
                 return json.dumps(log_data)
-        
+
         # Apply JSON formatter to root handler
         root_handler = logging.getLogger().handlers[0]
         root_handler.setFormatter(JSONFormatter())
@@ -91,15 +93,16 @@ logger = logging.getLogger(__name__)
 # Application Lifespan
 # ============================================================================
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan context manager.
-    
+
     Handles startup and shutdown events.
-    
+
     Args:
         app: FastAPI application instance.
-        
+
     Yields:
         None
     """
@@ -128,22 +131,25 @@ async def lifespan(app: FastAPI):
 
     app.state.startup_warnings = startup_warnings
     if startup_warnings:
-        logger.warning("Application started in degraded mode with %d dependency warnings", len(startup_warnings))
+        logger.warning(
+            "Application started in degraded mode with %d dependency warnings",
+            len(startup_warnings),
+        )
     else:
         logger.info("Application startup complete")
-    
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down application...")
-    
+
     try:
         await close_dependencies()
         logger.info("All connections closed")
-        
+
     except Exception as e:
         logger.error(f"Shutdown error: {e}", exc_info=True)
-    
+
     logger.info("Application shutdown complete")
 
 
@@ -151,9 +157,10 @@ async def lifespan(app: FastAPI):
 # FastAPI Application
 # ============================================================================
 
+
 def create_application() -> FastAPI:
     """Create and configure FastAPI application.
-    
+
     Returns:
         FastAPI: Configured application instance.
     """
@@ -186,7 +193,7 @@ def create_application() -> FastAPI:
         openapi_url="/openapi.json" if settings.debug else None,
         lifespan=lifespan,
     )
-    
+
     # Add CORS middleware
     app.add_middleware(
         CORSMiddleware,
@@ -195,10 +202,10 @@ def create_application() -> FastAPI:
         allow_methods=settings.cors_allow_methods,
         allow_headers=settings.cors_allow_headers,
     )
-    
+
     # Add GZip compression
     app.add_middleware(GZipMiddleware, minimum_size=1000)
-    
+
     # Add rate limiting middleware
     if settings.rate_limit_enabled:
         app.add_middleware(
@@ -206,14 +213,14 @@ def create_application() -> FastAPI:
             max_requests=settings.rate_limit_requests,
             window_seconds=settings.rate_limit_window_seconds,
         )
-    
+
     # Include routers
     app.include_router(analysis.router)
     app.include_router(satellites.router)
     app.include_router(route.router)
     app.include_router(health.router)
     # TODO: Standardize route versioning and remove direct root route coupling from app setup.
-    
+
     return app
 
 
@@ -225,26 +232,27 @@ app = create_application()
 # Exception Handlers
 # ============================================================================
 
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle unhandled exceptions.
-    
+
     Args:
         request: FastAPI request object.
         exc: The exception that was raised.
-        
+
     Returns:
         JSONResponse: Error response following RFC 7807.
     """
     request_id = getattr(request.state, "request_id", str(uuid.uuid4())[:12])
-    
+
     category = "internal_error"
     logger.error(
         f"[{request_id}] Unhandled exception [{category}]: {exc}",
         exc_info=True,
         extra={"request_id": request_id, "category": category},
     )
-    
+
     problem = ProblemDetail(
         type="https://api.linkspot.io/errors/internal-server-error",
         title="Internal Server Error",
@@ -253,7 +261,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
         instance=str(request.url.path),
         request_id=request_id,
     )
-    
+
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=problem.model_dump(exclude_none=True),
@@ -263,18 +271,18 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
     """Handle ValueError exceptions.
-    
+
     Args:
         request: FastAPI request object.
         exc: The ValueError that was raised.
-        
+
     Returns:
         JSONResponse: Error response following RFC 7807.
     """
     request_id = getattr(request.state, "request_id", str(uuid.uuid4())[:12])
-    
+
     logger.warning(f"[{request_id}] Value error: {exc}")
-    
+
     problem = ProblemDetail(
         type="https://api.linkspot.io/errors/invalid-value",
         title="Invalid Value",
@@ -283,7 +291,7 @@ async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse
         instance=str(request.url.path),
         request_id=request_id,
     )
-    
+
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
         content=problem.model_dump(exclude_none=True),
@@ -294,21 +302,22 @@ async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse
 # Request Middleware
 # ============================================================================
 
+
 @app.middleware("http")
 async def request_logging_middleware(request: Request, call_next: Any) -> Any:
     """Log all requests with timing information.
-    
+
     Args:
         request: FastAPI request object.
         call_next: Next middleware/handler in chain.
-        
+
     Returns:
         Response: The response from the next handler.
     """
     # Generate request ID
     request_id = request.headers.get("X-Request-ID", str(uuid.uuid4())[:12])
     request.state.request_id = request_id
-    
+
     # Log request start
     start_time = time.time()
     client_ip = request.client.host if request.client else "unknown"
@@ -317,15 +326,15 @@ async def request_logging_middleware(request: Request, call_next: Any) -> Any:
         extra={"request_id": request_id, "client_ip": client_ip},
     )
     # TODO: Avoid logging request bodies for all verbs by default; this currently adds per-request overhead.
-    
+
     # Process request
     try:
         response = await call_next(request)
-        
+
         # Calculate duration
         duration_ms = (time.time() - start_time) * 1000
         status_class = f"{response.status_code // 100}xx"
-        
+
         # Log request completion
         logger.info(
             f"[{request_id}] {request.method} {request.url.path} - "
@@ -339,12 +348,12 @@ async def request_logging_middleware(request: Request, call_next: Any) -> Any:
             },
         )
         # TODO: Add structured fields for client IP and status class summaries.
-        
+
         # Add request ID to response headers
         response.headers["X-Request-ID"] = request_id
-        
+
         return response
-        
+
     except Exception as e:
         duration_ms = (time.time() - start_time) * 1000
         logger.error(
@@ -366,6 +375,7 @@ async def request_logging_middleware(request: Request, call_next: Any) -> Any:
 # Root Endpoint
 # ============================================================================
 
+
 @app.get(
     "/",
     tags=["Root"],
@@ -374,7 +384,7 @@ async def request_logging_middleware(request: Request, call_next: Any) -> Any:
 )
 async def root() -> dict[str, Any]:
     """Root endpoint returning API information.
-    
+
     Returns:
         dict: API information.
     """
@@ -404,7 +414,7 @@ async def root() -> dict[str, Any]:
 )
 async def api_info() -> dict[str, Any]:
     """API version information endpoint.
-    
+
     Returns:
         dict: API version and endpoint information.
     """
@@ -438,6 +448,11 @@ async def api_info() -> dict[str, Any]:
                 "methods": ["GET"],
                 "description": "Constellation information",
             },
+            {
+                "path": "/api/v1/satellites/constellation/map",
+                "methods": ["GET"],
+                "description": "Constellation map subpoint positions",
+            },
         ],
     }
 
@@ -448,7 +463,7 @@ async def api_info() -> dict[str, Any]:
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     uvicorn.run(
         "main:app",
         host=settings.host,

@@ -12,6 +12,7 @@ const store = require('./store');
 const { createMenu } = require('./menu');
 const { createTray, destroyTray } = require('./tray');
 const { setupUpdater } = require('./updater');
+const { createLocalBackendManager } = require('./local-backend');
 
 // Configure logging
 log.transports.file.level = 'info';
@@ -23,6 +24,7 @@ registerScheme();
 let mainWindow = null;
 let settingsWindow = null;
 let backendPollIntervalId = null;
+let localBackendManager = null;
 
 function isTrustedRenderer(webContents) {
   try {
@@ -126,7 +128,8 @@ function createSettingsWindow() {
 ipcMain.handle('get-settings', () => {
   return {
     backendURL: store.get('backendURL'),
-    notifications: store.get('notifications')
+    notifications: store.get('notifications'),
+    autoStartLocalBackend: store.get('autoStartLocalBackend')
   };
 });
 
@@ -142,7 +145,8 @@ ipcMain.handle('set-settings', (_event, settings) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('settings-changed', {
       backendURL: store.get('backendURL'),
-      notifications: store.get('notifications')
+      notifications: store.get('notifications'),
+      autoStartLocalBackend: store.get('autoStartLocalBackend')
     });
   }
 
@@ -192,6 +196,13 @@ ipcMain.handle('show-notification', (_event, opts) => {
   return { shown: true };
 });
 
+ipcMain.handle('start-local-backend', async () => {
+  if (!localBackendManager) {
+    return { success: false, error: 'Local backend manager is unavailable.' };
+  }
+  return localBackendManager.start({ trigger: 'manual' });
+});
+
 // ============================================
 // APP LIFECYCLE
 // ============================================
@@ -237,6 +248,24 @@ app.whenReady().then(() => {
 
   // Create main window
   createMainWindow();
+
+  // Local backend manager for one-click Docker startup
+  localBackendManager = createLocalBackendManager({
+    app,
+    net,
+    shell,
+    log,
+    store,
+    onStatus: (status) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('backend-bootstrap-status', status);
+      }
+    }
+  });
+
+  localBackendManager.autoStartIfEnabled().catch((error) => {
+    log.warn('Auto-start local backend failed:', error && error.message ? error.message : error);
+  });
 
   // Create application menu (passes settings window opener)
   createMenu({
@@ -309,6 +338,7 @@ app.on('before-quit', () => {
   if (typeof backendPollIntervalId !== 'undefined') {
     clearInterval(backendPollIntervalId);
   }
+  localBackendManager = null;
 });
 
 // Expose createSettingsWindow for menu module

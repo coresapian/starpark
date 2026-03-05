@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>app.starpark.selfhost</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__DEPLOY_SCRIPT__</string>
+    <string>ensure-up</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ENV_FILE</key>
+    <string>__ENV_FILE__</string>
+    <key>PROJECT_NAME</key>
+    <string>starpark</string>
+    <key>DEPLOY_MODE</key>
+    <string>ensure-up</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/selfhost.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/selfhost.err.log</string>
+</dict>
+</plist>

@@ -13,6 +13,20 @@ files:
   - "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}"
   - "!**/node_modules/.cache/**"
 
+extraResources:
+  - from: docker-compose.yml
+    to: runtime/docker-compose.yml
+  - from: backend
+    to: runtime/backend
+    filter:
+      - "**/*"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+  - from: frontend
+    to: runtime/frontend
+  - from: scripts
+    to: runtime/scripts
+
 mac:
   category: public.app-category.utilities
   icon: electron/icons/icon.icns

@@ -26,6 +26,9 @@ function normalizeSettingsPatch(patch = {}) {
   if (Object.prototype.hasOwnProperty.call(patch, 'autoUpdateEnabled')) {
     normalized.autoUpdateEnabled = Boolean(patch.autoUpdateEnabled);
   }
+  if (Object.prototype.hasOwnProperty.call(patch, 'autoStartLocalBackend')) {
+    normalized.autoStartLocalBackend = Boolean(patch.autoStartLocalBackend);
+  }
   return normalized;
 }
 
@@ -39,6 +42,10 @@ const schema = {
     default: true
   },
   autoUpdateEnabled: {
+    type: 'boolean',
+    default: true
+  },
+  autoStartLocalBackend: {
     type: 'boolean',
     default: true
   },

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>app.starpark.pgrok.tunnel</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__TUNNEL_SCRIPT__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ENV_FILE</key>
+    <string>__ENV_FILE__</string>
+    <key>PGROK_REPO</key>
+    <string>__PGROK_REPO__</string>
+    <key>PGROK_SUBDOMAIN</key>
+    <string>api</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/pgrok.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/pgrok.err.log</string>
+</dict>
+</plist>

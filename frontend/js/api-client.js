@@ -460,6 +460,35 @@ class APIClient {
             method: 'GET'
         });
     }
+
+    /**
+     * Get Starlink constellation map points.
+     * @param {string|number|null} [timestamp] - Optional ISO timestamp
+     * @param {number|null} [limit] - Optional max number of satellites
+     * @returns {Promise<Object>} Constellation map payload
+     */
+    async getConstellationMap(timestamp = null, limit = null) {
+        const params = new URLSearchParams();
+
+        if (timestamp) {
+            params.append('timestamp', timestamp.toString());
+        }
+
+        if (limit != null && Number.isFinite(Number(limit))) {
+            const normalizedLimit = Math.max(100, Math.floor(Number(limit)));
+            params.append('limit', normalizedLimit.toString());
+        }
+
+        const query = params.toString();
+        return this.request(
+            `/satellites/constellation/map${query ? `?${query}` : ''}`,
+            {
+                method: 'GET',
+                _timeoutMs: 45000,
+                _maxRetries: 1
+            }
+        );
+    }
     
     /**
      * Check API health status

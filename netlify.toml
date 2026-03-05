@@ -1,0 +1,6 @@
+[build]
+  publish = "frontend"
+  command = "echo 'No build step required for static frontend'"
+
+[dev]
+  publish = "frontend"

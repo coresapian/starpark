@@ -112,6 +112,37 @@ class _MockSatelliteEngine:
             }
         ]
 
+    async def get_constellation_map_positions(self, timestamp=None, limit=None):
+        _ = timestamp
+        points = [
+            {
+                "satellite_id": "1001",
+                "norad_id": 1001,
+                "name": "STARLINK TEST A",
+                "latitude": 39.745,
+                "longitude": -104.98,
+                "altitude_km": 550.0,
+                "velocity_kms": 7.6,
+                "constellation": "Starlink",
+            },
+            {
+                "satellite_id": "1002",
+                "norad_id": 1002,
+                "name": "STARLINK TEST B",
+                "latitude": 40.02,
+                "longitude": -105.22,
+                "altitude_km": 548.8,
+                "velocity_kms": 7.58,
+                "constellation": "Starlink",
+            },
+        ]
+        if isinstance(limit, int) and limit > 0:
+            points = points[:limit]
+        return {
+            "satellites": points,
+            "source": "space-track",
+        }
+
 
 class _MockDataPipeline:
     initialized = True
@@ -395,6 +426,21 @@ class TestSatelliteEndpoints(unittest.TestCase):
             self.assertGreater(constellation["total_satellites"], 0)
             self.assertIsNotNone(constellation.get("altitude_km"))
             self.assertGreater(constellation.get("altitude_km", 0), 0)
+
+    def test_constellation_map_endpoint(self):
+        response = self.client.get(
+            "/api/v1/satellites/constellation/map",
+            params={"limit": 1000},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("satellites", data)
+        self.assertIn("count", data)
+        self.assertEqual(data["source"], "space-track")
+        self.assertEqual(data["count"], 2)
+        first = data["satellites"][0]
+        self.assertIn("latitude", first)
+        self.assertIn("longitude", first)
 
 
 class TestRoutePlanningEndpoints(unittest.TestCase):

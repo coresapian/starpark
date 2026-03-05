@@ -405,6 +405,7 @@ class SatellitePosition(BaseModel):
         ..., description="Satellite identifier (name or catalog number)"
     )
     norad_id: Optional[int] = Field(default=None, description="NORAD catalog number")
+    name: Optional[str] = Field(default=None, description="Satellite display name")
     azimuth: float = Field(
         ..., ge=0.0, le=360.0, description="Azimuth angle in degrees (0=N, 90=E)"
     )
@@ -417,9 +418,78 @@ class SatellitePosition(BaseModel):
     velocity_kms: Optional[float] = Field(
         default=None, description="Orbital velocity in km/s"
     )
+    latitude: Optional[float] = Field(
+        default=None,
+        ge=-90.0,
+        le=90.0,
+        description="Satellite subpoint latitude in degrees",
+    )
+    longitude: Optional[float] = Field(
+        default=None,
+        ge=-180.0,
+        le=180.0,
+        description="Satellite subpoint longitude in degrees",
+    )
+    altitude_km: Optional[float] = Field(
+        default=None, ge=0.0, description="Satellite altitude above WGS84 in km"
+    )
+    is_visible: Optional[bool] = Field(
+        default=None, description="True when above local elevation mask"
+    )
     constellation: Optional[str] = Field(
         default=None, description="Constellation name (e.g., Starlink, OneWeb)"
     )
+
+
+class ConstellationMapSatellite(BaseModel):
+    """Satellite point used for map overlays."""
+
+    satellite_id: str = Field(..., description="Satellite identifier")
+    norad_id: Optional[int] = Field(default=None, description="NORAD catalog number")
+    name: Optional[str] = Field(default=None, description="Satellite display name")
+    latitude: float = Field(
+        ..., ge=-90.0, le=90.0, description="Subpoint latitude in degrees"
+    )
+    longitude: float = Field(
+        ..., ge=-180.0, le=180.0, description="Subpoint longitude in degrees"
+    )
+    altitude_km: float = Field(..., ge=0.0, description="Altitude in kilometers")
+    velocity_kms: Optional[float] = Field(
+        default=None, ge=0.0, description="Orbital speed in km/s"
+    )
+    constellation: str = Field(default="Starlink", description="Constellation label")
+
+
+class ConstellationMapResponse(BaseModel):
+    """Response model for constellation map points."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "satellites": [
+                    {
+                        "satellite_id": "44713",
+                        "name": "STARLINK-1007",
+                        "latitude": 38.25,
+                        "longitude": -97.43,
+                        "altitude_km": 548.4,
+                        "velocity_kms": 7.58,
+                        "constellation": "Starlink",
+                    }
+                ],
+                "count": 1,
+                "timestamp": "2024-06-15T12:00:00Z",
+                "source": "space-track",
+            }
+        }
+    )
+
+    satellites: list[ConstellationMapSatellite] = Field(
+        default_factory=list, description="Satellite map points"
+    )
+    count: int = Field(..., ge=0, description="Number of points returned")
+    timestamp: datetime = Field(..., description="Prediction timestamp")
+    source: str = Field(..., description="TLE source used by the engine")
 
 
 class VisibleSatellitesResponse(BaseModel):

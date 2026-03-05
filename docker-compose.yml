@@ -83,6 +83,7 @@ services:
       
       # Application Settings
       APP_ENV: ${APP_ENV:-development}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DEBUG: ${DEBUG:-true}
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-false}

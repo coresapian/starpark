@@ -6,6 +6,7 @@ const backendInput = document.getElementById('backend-url');
 const testBtn = document.getElementById('test-btn');
 const testStatus = document.getElementById('test-status');
 const notificationsToggle = document.getElementById('notifications-toggle');
+const autoStartBackendToggle = document.getElementById('autostart-backend-toggle');
 const saveBtn = document.getElementById('save-btn');
 const cancelBtn = document.getElementById('cancel-btn');
 let isDirty = false;
@@ -32,6 +33,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   const settings = await window.electronAPI.getSettings();
   backendInput.value = settings.backendURL || '';
   notificationsToggle.checked = settings.notifications !== false;
+  autoStartBackendToggle.checked = settings.autoStartLocalBackend !== false;
 });
 
 // Test connection
@@ -78,7 +80,8 @@ saveBtn.addEventListener('click', async () => {
   }
   await window.electronAPI.setSettings({
     backendURL: url,
-    notifications: notificationsToggle.checked
+    notifications: notificationsToggle.checked,
+    autoStartLocalBackend: autoStartBackendToggle.checked
   });
 
   isDirty = false;
@@ -95,6 +98,7 @@ cancelBtn.addEventListener('click', () => {
 
 backendInput.addEventListener('input', () => { isDirty = true; });
 notificationsToggle.addEventListener('change', () => { isDirty = true; });
+autoStartBackendToggle.addEventListener('change', () => { isDirty = true; });
 
 // Enter key in URL input triggers test
 backendInput.addEventListener('keydown', (e) => {
