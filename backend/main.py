@@ -89,6 +89,101 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Handle unhandled exceptions."""
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4())[:12])
+
+    category = "internal_error"
+    logger.error(
+        f"[{request_id}] Unhandled exception [{category}]: {exc}",
+        exc_info=True,
+        extra={"request_id": request_id, "category": category},
+    )
+
+    problem = ProblemDetail(
+        type="https://api.linkspot.io/errors/internal-server-error",
+        title="Internal Server Error",
+        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="An unexpected error occurred. Please try again later.",
+        instance=str(request.url.path),
+        request_id=request_id,
+    )
+
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content=problem.model_dump(exclude_none=True),
+    )
+
+
+async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
+    """Handle ValueError exceptions."""
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4())[:12])
+
+    logger.warning(f"[{request_id}] Value error: {exc}")
+
+    problem = ProblemDetail(
+        type="https://api.linkspot.io/errors/invalid-value",
+        title="Invalid Value",
+        status=status.HTTP_400_BAD_REQUEST,
+        detail=str(exc),
+        instance=str(request.url.path),
+        request_id=request_id,
+    )
+
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content=problem.model_dump(exclude_none=True),
+    )
+
+
+async def request_logging_middleware(request: Request, call_next: Any) -> Any:
+    """Log all requests with timing information."""
+    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4())[:12])
+    request.state.request_id = request_id
+
+    start_time = time.time()
+    client_ip = request.client.host if request.client else "unknown"
+    logger.info(
+        f"[{request_id}] {request.method} {request.url.path} - Started",
+        extra={"request_id": request_id, "client_ip": client_ip},
+    )
+    # TODO: Avoid logging request bodies for all verbs by default; this currently adds per-request overhead.
+
+    try:
+        response = await call_next(request)
+        duration_ms = (time.time() - start_time) * 1000
+        status_class = f"{response.status_code // 100}xx"
+        logger.info(
+            f"[{request_id}] {request.method} {request.url.path} - "
+            f"Completed {response.status_code} in {duration_ms:.2f}ms",
+            extra={
+                "request_id": request_id,
+                "duration_ms": round(duration_ms, 2),
+                "status_code": response.status_code,
+                "status_class": status_class,
+                "client_ip": client_ip,
+            },
+        )
+        # TODO: Add structured fields for client IP and status class summaries.
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        logger.error(
+            f"[{request_id}] {request.method} {request.url.path} - "
+            f"Failed in {duration_ms:.2f}ms: {e}",
+            extra={
+                "request_id": request_id,
+                "duration_ms": round(duration_ms, 2),
+                "status_class": "5xx",
+                "client_ip": client_ip,
+                "category": "request_failure",
+            },
+            exc_info=True,
+        )
+        raise
+
+
 # ============================================================================
 # Application Lifespan
 # ============================================================================
@@ -221,154 +316,15 @@ def create_application() -> FastAPI:
     app.include_router(health.router)
     # TODO: Standardize route versioning and remove direct root route coupling from app setup.
 
+    app.add_exception_handler(Exception, global_exception_handler)
+    app.add_exception_handler(ValueError, value_error_handler)
+    app.middleware("http")(request_logging_middleware)
+
     return app
 
 
 # Create application instance
 app = create_application()
-
-
-# ============================================================================
-# Exception Handlers
-# ============================================================================
-
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Handle unhandled exceptions.
-
-    Args:
-        request: FastAPI request object.
-        exc: The exception that was raised.
-
-    Returns:
-        JSONResponse: Error response following RFC 7807.
-    """
-    request_id = getattr(request.state, "request_id", str(uuid.uuid4())[:12])
-
-    category = "internal_error"
-    logger.error(
-        f"[{request_id}] Unhandled exception [{category}]: {exc}",
-        exc_info=True,
-        extra={"request_id": request_id, "category": category},
-    )
-
-    problem = ProblemDetail(
-        type="https://api.linkspot.io/errors/internal-server-error",
-        title="Internal Server Error",
-        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail="An unexpected error occurred. Please try again later.",
-        instance=str(request.url.path),
-        request_id=request_id,
-    )
-
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content=problem.model_dump(exclude_none=True),
-    )
-
-
-@app.exception_handler(ValueError)
-async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
-    """Handle ValueError exceptions.
-
-    Args:
-        request: FastAPI request object.
-        exc: The ValueError that was raised.
-
-    Returns:
-        JSONResponse: Error response following RFC 7807.
-    """
-    request_id = getattr(request.state, "request_id", str(uuid.uuid4())[:12])
-
-    logger.warning(f"[{request_id}] Value error: {exc}")
-
-    problem = ProblemDetail(
-        type="https://api.linkspot.io/errors/invalid-value",
-        title="Invalid Value",
-        status=status.HTTP_400_BAD_REQUEST,
-        detail=str(exc),
-        instance=str(request.url.path),
-        request_id=request_id,
-    )
-
-    return JSONResponse(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        content=problem.model_dump(exclude_none=True),
-    )
-
-
-# ============================================================================
-# Request Middleware
-# ============================================================================
-
-
-@app.middleware("http")
-async def request_logging_middleware(request: Request, call_next: Any) -> Any:
-    """Log all requests with timing information.
-
-    Args:
-        request: FastAPI request object.
-        call_next: Next middleware/handler in chain.
-
-    Returns:
-        Response: The response from the next handler.
-    """
-    # Generate request ID
-    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4())[:12])
-    request.state.request_id = request_id
-
-    # Log request start
-    start_time = time.time()
-    client_ip = request.client.host if request.client else "unknown"
-    logger.info(
-        f"[{request_id}] {request.method} {request.url.path} - Started",
-        extra={"request_id": request_id, "client_ip": client_ip},
-    )
-    # TODO: Avoid logging request bodies for all verbs by default; this currently adds per-request overhead.
-
-    # Process request
-    try:
-        response = await call_next(request)
-
-        # Calculate duration
-        duration_ms = (time.time() - start_time) * 1000
-        status_class = f"{response.status_code // 100}xx"
-
-        # Log request completion
-        logger.info(
-            f"[{request_id}] {request.method} {request.url.path} - "
-            f"Completed {response.status_code} in {duration_ms:.2f}ms",
-            extra={
-                "request_id": request_id,
-                "duration_ms": round(duration_ms, 2),
-                "status_code": response.status_code,
-                "status_class": status_class,
-                "client_ip": client_ip,
-            },
-        )
-        # TODO: Add structured fields for client IP and status class summaries.
-
-        # Add request ID to response headers
-        response.headers["X-Request-ID"] = request_id
-
-        return response
-
-    except Exception as e:
-        duration_ms = (time.time() - start_time) * 1000
-        logger.error(
-            f"[{request_id}] {request.method} {request.url.path} - "
-            f"Failed in {duration_ms:.2f}ms: {e}",
-            extra={
-                "request_id": request_id,
-                "duration_ms": round(duration_ms, 2),
-                "status_class": "5xx",
-                "client_ip": client_ip,
-                "category": "request_failure",
-            },
-            exc_info=True,
-        )
-        raise
 
 
 # ============================================================================

@@ -336,6 +336,46 @@ def _build_test_client() -> TestClient:
     return TestClient(app)
 
 
+def _build_application_client() -> TestClient:
+    from main import create_application
+
+    app = create_application()
+
+    redis = _MockRedis()
+    sat = _MockSatelliteEngine()
+    pipeline = _MockDataPipeline()
+    obstruction = _MockObstructionEngine()
+    osrm = _MockOSRMClient()
+    amenity = _MockAmenityService()
+
+    async def override_redis():
+        return redis
+
+    async def override_satellite_engine():
+        return sat
+
+    async def override_data_pipeline():
+        return pipeline
+
+    async def override_obstruction_engine():
+        return obstruction
+
+    async def override_osrm_client():
+        return osrm
+
+    async def override_amenity_service():
+        return amenity
+
+    app.dependency_overrides[get_redis] = override_redis
+    app.dependency_overrides[get_satellite_engine] = override_satellite_engine
+    app.dependency_overrides[get_data_pipeline] = override_data_pipeline
+    app.dependency_overrides[get_obstruction_engine] = override_obstruction_engine
+    app.dependency_overrides[get_osrm_client] = override_osrm_client
+    app.dependency_overrides[get_amenity_service] = override_amenity_service
+
+    return TestClient(app)
+
+
 class TestHealthEndpoints(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -394,6 +434,31 @@ class TestAnalysisEndpoints(unittest.TestCase):
         self.assertIn("center", data)
         self.assertIn("data_quality", data)
         self.assertIn("roads:overpass", data["data_quality"]["sources"])
+
+    def test_heatmap_falls_back_to_full_grid_when_road_mask_fails(self):
+        client = _build_test_client()
+
+        class _ExplodingAmenityService(_MockAmenityService):
+            def query_road_access_mask(self, min_lat, min_lon, max_lat, max_lon):
+                _ = (min_lat, min_lon, max_lat, max_lon)
+                raise RuntimeError("overpass down")
+
+        async def override_amenity_service():
+            return _ExplodingAmenityService()
+
+        from dependencies import get_amenity_service as _get_amenity_service
+
+        client.app.dependency_overrides[_get_amenity_service] = override_amenity_service
+
+        response = client.post(
+            "/api/v1/heatmap",
+            json={"lat": 40.7128, "lon": -74.0060, "radius_m": 100, "spacing_m": 50},
+        )
+        self.assertEqual(response.status_code, 200)
+        grid_features = response.json()["grid"]["features"]
+        self.assertGreater(len(grid_features), 0)
+        warnings = response.json()["data_quality"]["warnings"]
+        self.assertTrue(any("Road/parking mask lookup failed" in warning for warning in warnings))
 
     def test_analyze_invalid_latitude(self):
         response = self.client.post(
@@ -479,6 +544,14 @@ class TestRoutePlanningEndpoints(unittest.TestCase):
         data = response.json()
         self.assertGreater(data["mission_summary"]["total_distance_m"], 0)
         self.assertIsInstance(data["waypoints"], list)
+
+
+class TestRuntimeRegressions(unittest.TestCase):
+    def test_request_id_is_propagated_from_middleware_state(self):
+        client = _build_application_client()
+        response = client.get("/api/v1/health", headers={"X-Request-ID": "req-test-123"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("X-Request-ID"), "req-test-123")
 
 
 class TestRouteCorridorFiltering(unittest.TestCase):

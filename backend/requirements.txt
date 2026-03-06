@@ -30,7 +30,6 @@ urllib3>=2.0.0
 
 # --- Satellite (requirements_satellite.txt) ---
 skyfield>=1.46.0
-sgp4>=2.23
 
 # --- Geospatial (requirements_raycasting.txt / requirements_db.txt) ---
 numpy>=1.24.0,<2.0.0

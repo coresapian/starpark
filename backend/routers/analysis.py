@@ -846,10 +846,10 @@ async def generate_heatmap(
             )
 
         if not road_mask_applied:
-            accessible_points = []
+            accessible_points = list(grid_points)
 
         logger.info(
-            f"[{request_id}] Analyzing {len(accessible_points)} driveable grid points"
+            f"[{request_id}] Analyzing {len(accessible_points)} heatmap grid points"
         )
 
         # Fetch buildings and terrain for the entire area

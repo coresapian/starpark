@@ -4,6 +4,7 @@
  */
 
 const { app, BrowserWindow, ipcMain, Notification, session, dialog, shell, net } = require('electron');
+const fs = require('fs');
 const path = require('path');
 const log = require('electron-log');
 const windowStateKeeper = require('electron-window-state');
@@ -25,6 +26,14 @@ let mainWindow = null;
 let settingsWindow = null;
 let backendPollIntervalId = null;
 let localBackendManager = null;
+
+function resolvePreloadPath() {
+  const emittedPath = path.join(__dirname, 'dist', 'preload.js');
+  if (fs.existsSync(emittedPath)) {
+    return emittedPath;
+  }
+  return path.join(__dirname, 'preload.js');
+}
 
 function isTrustedRenderer(webContents) {
   try {
@@ -56,7 +65,7 @@ function createMainWindow() {
     trafficLightPosition: { x: 16, y: 16 },
     backgroundColor: '#1a1a2e',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: resolvePreloadPath(),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -67,7 +76,7 @@ function createMainWindow() {
   mainWindowState.manage(mainWindow);
 
   // Load the app via custom protocol
-  mainWindow.loadURL('app://linkspot/index.html').catch((err) => {
+  mainWindow.loadURL('app://linkspot/').catch((err) => {
     log.error('Failed to load app:// URL:', err);
   });
 
@@ -103,7 +112,7 @@ function createSettingsWindow() {
     modal: false,
     show: false,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: resolvePreloadPath(),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -218,7 +227,6 @@ app.whenReady().then(() => {
       const plistPath = path.join(
         path.dirname(process.execPath), '..', 'Info.plist'
       );
-      const fs = require('fs');
       if (fs.existsSync(plistPath)) {
         const content = fs.readFileSync(plistPath, 'utf-8');
         if (!content.includes('NSLocationUsageDescription')) {

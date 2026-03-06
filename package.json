@@ -2,18 +2,25 @@
   "name": "linkspot",
   "version": "1.0.0",
   "description": "LinkSpot - Satellite Visibility Analysis Platform",
-  "main": "electron/main.js",
+  "main": "electron/dist/main.js",
   "scripts": {
-    "start": "electron .",
-    "build": "electron-builder --mac",
-    "build:universal": "electron-builder --mac --universal",
-    "pack": "electron-builder --dir"
+    "frontend:dev": "npm --prefix frontend/app run dev",
+    "frontend:build": "npm --prefix frontend/app run build",
+    "frontend:typecheck": "npm --prefix frontend/app run typecheck",
+    "electron:build": "tsc -p electron/tsconfig.json",
+    "electron:typecheck": "tsc -p electron/tsconfig.json --noEmit",
+    "start": "npm run frontend:build && npm run electron:build && electron .",
+    "build": "npm run frontend:build && npm run electron:build && electron-builder --mac",
+    "build:universal": "npm run frontend:build && npm run electron:build && electron-builder --mac --universal",
+    "pack": "npm run frontend:build && npm run electron:build && electron-builder --dir"
   },
   "author": "LinkSpot",
   "license": "BSD-3-Clause",
   "devDependencies": {
+    "@types/node": "^22.10.2",
     "electron": "^28.1.0",
-    "electron-builder": "^24.9.1"
+    "electron-builder": "^24.9.1",
+    "typescript": "^5.7.2"
   },
   "dependencies": {
     "electron-log": "^5.1.1",

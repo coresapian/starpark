@@ -125,15 +125,36 @@ async def _check_satellite_engine_health(
     """
     start_time = time.time()
     try:
-        # Try to get constellations as a simple health check
-        constellations = await satellite_engine.get_constellations()
-        # TODO: Bound constellation probe time since this call can become expensive with full refreshs.
+        snapshot_getter = getattr(satellite_engine, "get_health_snapshot", None)
+        snapshot = None
+        if callable(snapshot_getter):
+            snapshot = await snapshot_getter()
+        else:
+            constellations = await satellite_engine.get_constellations()
+            snapshot = {
+                "loaded": bool(constellations),
+                "degraded": bool(getattr(satellite_engine, "is_degraded", False)),
+                "reason": getattr(satellite_engine, "degraded_reason", None),
+                "count": len(constellations),
+            }
+
         latency_ms = (time.time() - start_time) * 1000
+        degraded = bool(snapshot.get("degraded"))
+        loaded = bool(snapshot.get("loaded"))
+        count = int(snapshot.get("count", 0))
         return ComponentHealth(
             name="satellite_engine",
-            status=ComponentStatus.HEALTHY,
+            status=(
+                ComponentStatus.DEGRADED
+                if degraded or not loaded
+                else ComponentStatus.HEALTHY
+            ),
             latency_ms=round(latency_ms, 2),
-            message=f"{len(constellations)} constellations loaded",
+            message=(
+                str(snapshot.get("reason"))
+                if degraded
+                else f"{count} satellites loaded"
+            ),
             last_check=datetime.now(timezone.utc),
         )
     except Exception as e:
@@ -158,27 +179,31 @@ async def _check_data_pipeline_health(data_pipeline: Any) -> ComponentHealth:
     """
     start_time = time.time()
     try:
-        # Check if pipeline is initialized
-        if hasattr(data_pipeline, 'initialized') and data_pipeline.initialized:
-            latency_ms = (time.time() - start_time) * 1000
-            return ComponentHealth(
-                name="data_pipeline",
-                status=ComponentStatus.HEALTHY,
-                latency_ms=round(latency_ms, 2),
-                last_check=datetime.now(timezone.utc),
-            )
+        snapshot_getter = getattr(data_pipeline, "get_health_snapshot", None)
+        if callable(snapshot_getter):
+            snapshot = await snapshot_getter()
         else:
-            # Try to initialize
-            if hasattr(data_pipeline, 'initialize'):
-                await data_pipeline.initialize()
-            # TODO: Avoid initializing heavy pipeline from health checks; use a lightweight readiness flag instead.
-            latency_ms = (time.time() - start_time) * 1000
-            return ComponentHealth(
-                name="data_pipeline",
-                status=ComponentStatus.HEALTHY,
-                latency_ms=round(latency_ms, 2),
-                last_check=datetime.now(timezone.utc),
-            )
+            snapshot = {
+                "initialized": bool(getattr(data_pipeline, "initialized", False)),
+                "degraded": bool(getattr(data_pipeline, "is_degraded", False)),
+                "reason": getattr(data_pipeline, "degraded_reason", None),
+            }
+
+        latency_ms = (time.time() - start_time) * 1000
+        initialized = bool(snapshot.get("initialized"))
+        degraded = bool(snapshot.get("degraded"))
+        status = (
+            ComponentStatus.DEGRADED
+            if degraded or not initialized
+            else ComponentStatus.HEALTHY
+        )
+        return ComponentHealth(
+            name="data_pipeline",
+            status=status,
+            latency_ms=round(latency_ms, 2),
+            message=str(snapshot.get("reason") or "ready"),
+            last_check=datetime.now(timezone.utc),
+        )
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
         return ComponentHealth(

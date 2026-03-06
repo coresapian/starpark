@@ -1,45 +1,33 @@
 # LinkSpot Frontend Dockerfile
-# Nginx-based static file server for Leaflet/Canvas application
+# React shell served at / with the legacy mission console mounted at /legacy/
+
+FROM node:22-alpine AS app-build
+
+WORKDIR /build/frontend-app
+
+COPY app/package.json app/package-lock.json ./
+RUN npm ci
+
+COPY app/ ./
+RUN npm run build
 
 FROM nginx:1.25-alpine
 
-# Install envsubst for environment variable substitution
-RUN apk add --no-cache gettext
-
-# Remove default nginx configuration
 RUN rm /etc/nginx/conf.d/default.conf
 
-# Create directory for static files
-RUN mkdir -p /usr/share/nginx/html \
-    && chown -R nginx:nginx /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=app-build /build/frontend-app/dist/ /usr/share/nginx/html/
+COPY index.html /usr/share/nginx/html/legacy/index.html
+COPY manifest.json /usr/share/nginx/html/legacy/manifest.json
+COPY sw.js /usr/share/nginx/html/legacy/sw.js
+COPY css/ /usr/share/nginx/html/legacy/css/
+COPY js/ /usr/share/nginx/html/legacy/js/
 
-# Copy static files
-COPY index.html /usr/share/nginx/html/
-COPY css/ /usr/share/nginx/html/css/
-COPY js/ /usr/share/nginx/html/js/
-
-# Copy custom nginx configuration template
-COPY nginx.conf /etc/nginx/conf.d/default.conf.template
-
-# Create health check endpoint
-RUN echo '{"status":"healthy","service":"linkspot-frontend"}' > /usr/share/nginx/html/health
-
-# Set proper permissions
-RUN chown -R nginx:nginx /usr/share/nginx/html \
+RUN echo '{"status":"healthy","service":"linkspot-frontend"}' > /usr/share/nginx/html/health \
+    && chown -R nginx:nginx /usr/share/nginx/html \
     && chmod -R 755 /usr/share/nginx/html
 
-# Expose port 80
 EXPOSE 80
 
-# Create entrypoint script for environment substitution
-RUN echo '#!/bin/sh\n\
-envsubst < /etc/nginx/conf.d/default.conf.template > /etc/nginx/conf.d/default.conf\n\
-exec nginx -g "daemon off;"' > /docker-entrypoint.sh \
-    && chmod +x /docker-entrypoint.sh
-
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD wget --quiet --tries=1 --spider http://localhost/health || exit 1
-
-# Start nginx with environment substitution
-ENTRYPOINT ["/docker-entrypoint.sh"]

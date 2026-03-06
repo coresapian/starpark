@@ -242,9 +242,12 @@ async def get_satellite_engine() -> Any:
     if _satellite_engine is None:
         sync_redis = _get_sync_redis()
         try:
-            _satellite_engine = _SatelliteEngineAdapter(sync_redis)
+            _satellite_engine = await asyncio.to_thread(
+                _SatelliteEngineAdapter,
+                sync_redis,
+            )
             logger.info(
-                "Satellite engine initialized (real — Space-Track/CelesTrak + Skyfield)"
+                "Satellite engine initialized (real — canonical math core + SGP4)"
             )
         except Exception as e:
             logger.warning(
@@ -279,9 +282,9 @@ class _SatelliteEngineAdapter:
     """Wraps real SatelliteEngine to match the async router interface."""
 
     def __init__(self, sync_redis):
-        from satellite_engine import SatelliteEngine
+        from services.satellite_catalog_service import SatelliteCatalogService
 
-        self._engine = SatelliteEngine(
+        self._engine = SatelliteCatalogService(
             sync_redis,
             space_track_identity=settings.spacetrack_identity,
             space_track_password=settings.spacetrack_password,
@@ -289,10 +292,22 @@ class _SatelliteEngineAdapter:
             space_track_per_minute_limit=settings.spacetrack_rate_limit_per_minute,
             space_track_per_hour_limit=settings.spacetrack_rate_limit_per_hour,
             space_track_timeout_seconds=settings.spacetrack_http_timeout_seconds,
+            min_elevation_deg=settings.elevation_mask_degrees,
         )
         self._engine.fetch_tle_data()
-        logger.info(f"Loaded {len(self._engine._satellites)} satellites from TLE data")
+        logger.info(
+            "Loaded %d satellites from TLE data",
+            len(getattr(self._engine, "_records", [])),
+        )
         # TODO: Move TLE refresh to a background updater to prevent stale ephemeris during long-lived sessions.
+
+    @property
+    def is_degraded(self) -> bool:
+        return bool(getattr(self._engine, "is_degraded", False))
+
+    @property
+    def degraded_reason(self) -> Optional[str]:
+        return getattr(self._engine, "degraded_reason", None)
 
     async def get_visible_satellites(
         self,
@@ -305,29 +320,13 @@ class _SatelliteEngineAdapter:
         import asyncio
 
         positions = await asyncio.to_thread(
-            self._engine.get_satellite_positions,
+            self._engine.get_visible_satellites,
             lat,
             lon,
             elevation,
             timestamp,
         )
-        return [
-            {
-                "satellite_id": p.satellite_id,
-                "norad_id": p.norad_id,
-                "name": p.name,
-                "azimuth": p.azimuth,
-                "elevation": p.elevation,
-                "range_km": p.range_km,
-                "latitude": p.latitude,
-                "longitude": p.longitude,
-                "altitude_km": p.altitude_km,
-                "velocity_kms": p.velocity_kms,
-                "constellation": p.constellation,
-                "is_visible": p.is_visible,
-            }
-            for p in positions
-        ]
+        return positions
 
     async def get_constellations(self) -> list[dict]:
         metadata = await asyncio.to_thread(self._engine.get_constellation_metadata)
@@ -343,11 +342,16 @@ class _SatelliteEngineAdapter:
             timestamp,
             limit,
         )
-        source = await asyncio.to_thread(self._engine.get_tle_source)
+        source = getattr(self._engine, "tle_source", "unknown")
         return {
             "satellites": positions,
             "source": source,
         }
+
+    async def get_health_snapshot(self) -> dict[str, Any]:
+        import asyncio
+
+        return await asyncio.to_thread(self._engine.health_snapshot)
 
 
 class _FallbackSatelliteEngine:
@@ -355,6 +359,8 @@ class _FallbackSatelliteEngine:
 
     def __init__(self, reason: str):
         self._reason = reason
+        self.is_degraded = True
+        self.degraded_reason = reason
 
     async def get_visible_satellites(
         self,
@@ -380,6 +386,16 @@ class _FallbackSatelliteEngine:
             "source": f"degraded:{self._reason}",
         }
 
+    async def get_health_snapshot(self) -> dict[str, Any]:
+        return {
+            "loaded": False,
+            "source": f"degraded:{self._reason}",
+            "last_update": None,
+            "degraded": True,
+            "reason": self._reason,
+            "count": 0,
+        }
+
 
 # ============================================================================
 # Data Pipeline Dependency
@@ -397,7 +413,11 @@ async def get_data_pipeline() -> Any:
         sync_redis = _get_sync_redis()
         postgis_url = str(settings.database_url).replace("+asyncpg", "")
         try:
-            _data_pipeline = _DataPipelineAdapter(sync_redis, postgis_url)
+            _data_pipeline = await asyncio.to_thread(
+                _DataPipelineAdapter,
+                sync_redis,
+                postgis_url,
+            )
             logger.info("Data pipeline initialized (real — Overture/OSM)")
         except Exception as e:
             logger.warning("Data pipeline unavailable; using degraded fallback: %s", e)
@@ -417,6 +437,8 @@ class _DataPipelineAdapter:
             postgis_conn_string=postgis_conn,
         )
         self._terrain_client = None
+        self.is_degraded = False
+        self.degraded_reason = None
 
     async def fetch_buildings(
         self,
@@ -488,12 +510,21 @@ class _DataPipelineAdapter:
             logger.warning("Terrain data unavailable: %s", str(e))
             return []
 
+    async def get_health_snapshot(self) -> dict[str, Any]:
+        return {
+            "initialized": True,
+            "degraded": self.is_degraded,
+            "reason": self.degraded_reason,
+        }
+
 
 class _FallbackDataPipeline:
     """Fallback data pipeline used when optional runtime deps are unavailable."""
 
     def __init__(self, reason: str):
         self._reason = reason
+        self.is_degraded = True
+        self.degraded_reason = reason
 
     async def fetch_buildings(
         self,
@@ -510,6 +541,13 @@ class _FallbackDataPipeline:
         radius_m: float,
     ) -> list[dict]:
         return []
+
+    async def get_health_snapshot(self) -> dict[str, Any]:
+        return {
+            "initialized": False,
+            "degraded": True,
+            "reason": self._reason,
+        }
 
 
 # ============================================================================
@@ -618,6 +656,11 @@ class _ObstructionEngineAdapter:
 
         return covered
 
+    def _azimuth_to_sector_index(self, azimuth_deg: float) -> int:
+        normalized = float(azimuth_deg) % 360.0
+        sector = int(math.floor(normalized / self.sector_width))
+        return max(0, min(self.n_sectors - 1, sector))
+
     def _update_profile_from_building(
         self,
         obstruction_profile: Any,
@@ -627,7 +670,7 @@ class _ObstructionEngineAdapter:
         building: dict[str, Any],
     ) -> None:
         import numpy as np
-        from enu_utils import azimuth_to_sector_index, wgs84_to_enu
+        from core_math import geodetic_to_enu
 
         building_height = max(0.0, self._to_float(building.get("height", 10.0), 10.0))
         base_elevation = self._to_float(building.get("ground_elevation", 0.0), 0.0)
@@ -644,14 +687,19 @@ class _ObstructionEngineAdapter:
             b_lons = np.array([b_lon], dtype=float)
             b_base = np.array([base_elevation], dtype=float)
 
-        e, n, _u = wgs84_to_enu(
-            b_lats,
-            b_lons,
-            b_base,
-            observer_lat,
-            observer_lon,
-            observer_elev,
-        )
+        enu_points = [
+            geodetic_to_enu(
+                float(lat_value),
+                float(lon_value),
+                float(base_value),
+                observer_lat,
+                observer_lon,
+                observer_elev,
+            )
+            for lat_value, lon_value, base_value in zip(b_lats, b_lons, b_base)
+        ]
+        e = np.array([point[0] for point in enu_points], dtype=float)
+        n = np.array([point[1] for point in enu_points], dtype=float)
 
         horizontal = np.sqrt(e**2 + n**2)
         valid = horizontal > 0.1
@@ -667,7 +715,10 @@ class _ObstructionEngineAdapter:
         elevations = np.degrees(
             np.arctan2(roof_heights - observer_elev, horizontal_valid)
         )
-        sectors = azimuth_to_sector_index(azimuths, self.sector_width)
+        sectors = np.array(
+            [self._azimuth_to_sector_index(value) for value in azimuths],
+            dtype=int,
+        )
         if sectors.size == 0:
             return
 
@@ -690,7 +741,7 @@ class _ObstructionEngineAdapter:
         terrain: list[dict[str, Any]],
     ) -> None:
         import numpy as np
-        from enu_utils import azimuth_to_sector_index, wgs84_to_enu
+        from core_math import geodetic_to_enu
 
         valid_samples: list[tuple[float, float, float]] = []
         for sample in terrain:
@@ -714,14 +765,20 @@ class _ObstructionEngineAdapter:
         t_lons = np.array([sample[1] for sample in valid_samples], dtype=float)
         t_elevs = np.array([sample[2] for sample in valid_samples], dtype=float)
 
-        e, n, u = wgs84_to_enu(
-            t_lats,
-            t_lons,
-            t_elevs,
-            observer_lat,
-            observer_lon,
-            observer_elev,
-        )
+        enu_points = [
+            geodetic_to_enu(
+                float(lat_value),
+                float(lon_value),
+                float(elev_value),
+                observer_lat,
+                observer_lon,
+                observer_elev,
+            )
+            for lat_value, lon_value, elev_value in zip(t_lats, t_lons, t_elevs)
+        ]
+        e = np.array([point[0] for point in enu_points], dtype=float)
+        n = np.array([point[1] for point in enu_points], dtype=float)
+        u = np.array([point[2] for point in enu_points], dtype=float)
         horizontal = np.sqrt(e**2 + n**2)
         valid = horizontal > 0.1
         if not np.any(valid):
@@ -729,8 +786,8 @@ class _ObstructionEngineAdapter:
 
         azimuths = np.mod(np.degrees(np.arctan2(e[valid], n[valid])), 360.0)
         terrain_elev = np.degrees(np.arctan2(u[valid], horizontal[valid]))
-        sectors = azimuth_to_sector_index(azimuths, self.sector_width)
-        for idx, sector in enumerate(sectors.tolist()):
+        sectors = [self._azimuth_to_sector_index(value) for value in azimuths]
+        for idx, sector in enumerate(sectors):
             obstruction_profile[int(sector)] = max(
                 obstruction_profile[int(sector)], float(terrain_elev[idx])
             )
@@ -746,7 +803,6 @@ class _ObstructionEngineAdapter:
     ) -> dict:
         """Perform ray-casting obstruction analysis at a single position."""
         import numpy as np
-        from enu_utils import azimuth_to_sector_index
 
         # Filter satellites above minimum elevation
         visible_sats = [
@@ -793,7 +849,7 @@ class _ObstructionEngineAdapter:
         for sat in visible_sats:
             az = sat.get("azimuth", 0.0)
             el = sat.get("elevation", 0.0)
-            sector = int(azimuth_to_sector_index(np.array([az]), self.sector_width)[0])
+            sector = self._azimuth_to_sector_index(float(az))
             is_obstructed = el <= obstruction_profile[sector]
             if not is_obstructed:
                 n_clear += 1
@@ -1130,6 +1186,10 @@ def get_request_id(request: Request) -> str:
     Returns:
         str: Request ID for logging and tracing.
     """
+    state_request_id = getattr(request.state, "request_id", None)
+    if isinstance(state_request_id, str) and state_request_id:
+        return state_request_id
+
     # Check for existing request ID in headers
     request_id = request.headers.get("X-Request-ID")
     if request_id:

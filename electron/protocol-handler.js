@@ -9,7 +9,8 @@ const path = require('path');
 const fs = require('fs');
 const store = require('./store');
 
-const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
+const LEGACY_FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
+const REACT_FRONTEND_DIR = path.join(__dirname, '..', 'frontend', 'app', 'dist');
 
 const MIME_TYPES = {
   '.html': 'text/html',
@@ -105,7 +106,7 @@ function setupProtocolHandler() {
     const pathname = url.pathname;
 
     // Intercept service worker registration — return no-op SW
-    if (pathname === '/sw.js') {
+    if (pathname === '/sw.js' || pathname === '/legacy/sw.js') {
       return new Response(NOOP_SW, {
         headers: { 'Content-Type': 'application/javascript' }
       });
@@ -116,8 +117,12 @@ function setupProtocolHandler() {
       return proxyToBackend(request, pathname + url.search);
     }
 
-    // Serve static files from frontend/
-    return serveStaticFile(pathname);
+    if (pathname === '/legacy' || pathname.startsWith('/legacy/')) {
+      const legacyPath = pathname === '/legacy' ? '/legacy/' : pathname;
+      return serveStaticFile(legacyPath.replace(/^\/legacy/, ''), LEGACY_FRONTEND_DIR);
+    }
+
+    return serveStaticFile(pathname, getDefaultFrontendDir());
   });
 }
 
@@ -203,11 +208,19 @@ async function proxyToBackend(request, pathAndQuery) {
 /**
  * Serve a static file from the frontend/ directory.
  */
-function serveStaticFile(pathname) {
+function getDefaultFrontendDir() {
+  const builtIndexPath = path.join(REACT_FRONTEND_DIR, 'index.html');
+  if (fs.existsSync(builtIndexPath)) {
+    return REACT_FRONTEND_DIR;
+  }
+  return LEGACY_FRONTEND_DIR;
+}
+
+function serveStaticFile(pathname, baseDir) {
   // Default to index.html for root or SPA routes
   let filePath;
   if (pathname === '/' || pathname === '') {
-    filePath = path.join(FRONTEND_DIR, 'index.html');
+    filePath = path.join(baseDir, 'index.html');
   } else {
     let decodedPath = pathname;
     try {
@@ -219,20 +232,20 @@ function serveStaticFile(pathname) {
       return new Response('Forbidden', { status: 403 });
     }
     const safePath = path.normalize(decodedPath).replace(/^(\.\.[\/\\])+/, '');
-    filePath = path.join(FRONTEND_DIR, safePath);
+    filePath = path.join(baseDir, safePath);
   }
 
-  // Prevent directory traversal — resolved path must stay within FRONTEND_DIR
+  // Prevent directory traversal — resolved path must stay within the selected frontend root
   const resolvedPath = path.resolve(filePath);
-  const resolvedFrontend = path.resolve(FRONTEND_DIR);
+  const resolvedFrontend = path.resolve(baseDir);
   if (!resolvedPath.startsWith(resolvedFrontend + path.sep) && resolvedPath !== resolvedFrontend) {
-    filePath = path.join(FRONTEND_DIR, 'index.html');
+    filePath = path.join(baseDir, 'index.html');
   }
 
   // Check file exists
   if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
     // SPA fallback: serve index.html for unknown paths
-    filePath = path.join(FRONTEND_DIR, 'index.html');
+    filePath = path.join(baseDir, 'index.html');
   }
 
   const ext = path.extname(filePath).toLowerCase();

@@ -126,6 +126,13 @@ def _resolve_location(
         ) from e
 
 
+async def _resolve_location_async(
+    location: RouteLocation, amenity_service: Any
+) -> tuple[float, float]:
+    """Resolve RouteLocation without blocking the event loop."""
+    return await asyncio.to_thread(_resolve_location, location, amenity_service)
+
+
 def _to_local_xy(
     lat: float,
     lon: float,
@@ -584,8 +591,8 @@ async def plan_route(
             detail="sample_interval_m must be positive",
         )
 
-    origin = _resolve_location(body.origin, amenity_service)
-    destination = _resolve_location(body.destination, amenity_service)
+    origin = await _resolve_location_async(body.origin, amenity_service)
+    destination = await _resolve_location_async(body.destination, amenity_service)
     timestamp = _parse_timestamp(body.time_utc)
 
     route_fetch_timeout = max(5.0, min(20.0, _remaining_budget_seconds(start_time)))
