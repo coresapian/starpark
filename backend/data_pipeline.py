@@ -490,6 +490,8 @@ class LinkSpotDataPipeline:
                     poolclass=NullPool,
                     connect_args={'connect_timeout': 10}
                 )
+                # TODO: Move DB client tuning (pooling, timeout, NullPool choice) into settings so
+                #      profiles can tune behavior independently.
                 logger.info("PostGIS database engine initialized")
             except Exception as e:
                 logger.warning(f"Failed to initialize PostGIS engine: {e}")
@@ -537,19 +539,27 @@ class LinkSpotDataPipeline:
         Returns:
             Tuple of (min_lon, min_lat, max_lon, max_lat)
         """
+        if radius_m <= 0:
+            raise ValueError(f"Radius must be positive, got {radius_m}")
         # Approximate degrees per meter (varies with latitude)
+        lat = float(np.clip(lat, -89.999, 89.999))
+        lon = ((float(lon) + 180.0) % 360.0) - 180.0
         meters_per_degree_lat = 111320.0
-        meters_per_degree_lon = meters_per_degree_lat * np.cos(np.radians(lat))
+        meters_per_degree_lon = max(1e-6, meters_per_degree_lat * np.cos(np.radians(lat)))
         
         delta_lat = radius_m / meters_per_degree_lat
         delta_lon = radius_m / meters_per_degree_lon
-        
-        return (
-            lon - delta_lon,
-            lat - delta_lat,
-            lon + delta_lon,
-            lat + delta_lat
-        )
+
+        min_lat = float(np.clip(lat - delta_lat, -90.0, 90.0))
+        max_lat = float(np.clip(lat + delta_lat, -90.0, 90.0))
+        min_lon = lon - delta_lon
+        max_lon = lon + delta_lon
+
+        # Antimeridian crossing: use full-longitude bbox fallback for safe external queries.
+        if min_lon < -180.0 or max_lon > 180.0:
+            return (-180.0, min_lat, 180.0, max_lat)
+
+        return (min_lon, min_lat, max_lon, max_lat)
     
     def _filter_by_radius(
         self,
@@ -567,7 +577,16 @@ class LinkSpotDataPipeline:
         # Calculate distance for each geometry
         # Use centroid for distance calculation
         gdf = gdf.copy()
-        gdf['distance_m'] = gdf.geometry.centroid.distance(center) * 111320.0  # Approximate
+        centroids = gdf.geometry.centroid
+        lat1 = np.radians(float(center_lat))
+        lon1 = np.radians(float(center_lon))
+        lat2 = np.radians(centroids.y.to_numpy())
+        lon2 = np.radians(centroids.x.to_numpy())
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+        c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+        gdf['distance_m'] = 6371000.0 * c
         
         # Filter by radius
         filtered = gdf[gdf['distance_m'] <= radius_m].copy()
@@ -639,6 +658,7 @@ class LinkSpotDataPipeline:
                     logger.info(f"Retrieved {len(buildings)} buildings from Overture Maps")
                     self.stats['overture_queries'] += 1
                     # Cache and return
+                    # TODO: Cache query provenance (source + bbox) so stale/partial results can be surfaced in telemetry.
                     self.cache_buildings(geohash, buildings)
                     filtered = self._filter_by_radius(buildings, lat, lon, radius_m)
                     return filtered
@@ -661,7 +681,13 @@ class LinkSpotDataPipeline:
                 logger.warning(f"OSM fallback query failed: {e}")
         
         # Return empty GeoDataFrame if all sources failed
-        logger.error("All building data sources failed")
+        logger.warning(
+            "All building data sources failed for location (%.4f, %.4f) radius=%dm. "
+            "Analysis will proceed with zero obstruction.",
+            lat,
+            lon,
+            int(radius_m),
+        )
         self.stats['errors'] += 1
         return gpd.GeoDataFrame(
             columns=['geometry', 'height', 'source'],
@@ -704,6 +730,10 @@ class LinkSpotDataPipeline:
                 rows = []
                 for row in result:
                     geom = json.loads(row.geom_geojson)
+                    if not geom or 'coordinates' not in geom:
+                        logger.debug("Skipping PostGIS row with malformed geometry payload")
+                        # TODO: Track malformed geometry events separately from query failures.
+                        continue
                     rows.append({
                         'geometry': Polygon(geom['coordinates'][0]),
                         'height': row.height,
@@ -762,6 +792,7 @@ class LinkSpotDataPipeline:
             
         except Exception as e:
             logger.error(f"Overture fetch error: {e}")
+            # TODO: Distinguish timeout/transient vs permanent Overture failures before surfacing status.
             return None
     
     def fetch_osm_buildings_fallback(
@@ -794,19 +825,33 @@ class LinkSpotDataPipeline:
         out skel qt;
         """
         
-        # Rate limiting - max 1 request per 2 seconds
-        time.sleep(2)
+        # Rate limiting - max ~1 request per 2 seconds with jitter.
+        time.sleep(1.8 + np.random.uniform(0.0, 0.4))
         
         try:
             logger.info("Querying OSM Overpass API")
-            response = requests.post(
+            overpass_hosts = [
                 'https://overpass-api.de/api/interpreter',
-                data={'data': overpass_query},
-                timeout=60
-            )
-            response.raise_for_status()
-            
-            data = response.json()
+                'https://overpass.kumi.systems/api/interpreter',
+                'https://overpass.openstreetmap.fr/api/interpreter',
+            ]
+            data = None
+            last_error = None
+            for host in overpass_hosts:
+                try:
+                    response = requests.post(
+                        host,
+                        data={'data': overpass_query},
+                        timeout=30,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning("Overpass host failed (%s): %s", host, exc)
+            if data is None:
+                raise requests.exceptions.RequestException(str(last_error))
             
             # Parse OSM data
             nodes = {}
@@ -930,6 +975,7 @@ class LinkSpotDataPipeline:
         
         try:
             bbox = self._bbox_from_radius(lat, lon, radius_m)
+            # TODO: Cap terrain radius and sampling density to avoid excessive patch extraction on broad requests.
             return self.terrain_client.get_elevation_patch(bbox)
             
         except Exception as e:
@@ -960,6 +1006,9 @@ class LinkSpotDataPipeline:
             
             # Convert GeoDataFrame to GeoJSON for storage
             geojson_str = buildings_data.to_json()
+            if len(geojson_str) > 5_000_000:
+                logger.warning("Skipping cache write for geohash %s: payload too large", geohash)
+                return False
             
             # Store with TTL
             self.redis_client.setex(
@@ -999,7 +1048,13 @@ class LinkSpotDataPipeline:
                 return None
             
             # Parse GeoJSON back to GeoDataFrame
-            gdf = gpd.read_file(cached_data.decode('utf-8'))
+            import io
+            decoded = cached_data.decode('utf-8')
+            payload = json.loads(decoded)
+            if not isinstance(payload, dict) or payload.get("type") != "FeatureCollection":
+                logger.warning("Invalid cached payload for geohash %s", geohash)
+                return None
+            gdf = gpd.read_file(io.StringIO(decoded))
             
             logger.debug(f"Cache hit for geohash {geohash}")
             return gdf
@@ -1037,10 +1092,11 @@ class LinkSpotDataPipeline:
         
         try:
             pattern = f"{self.CACHE_PREFIX}*"
-            keys = self.redis_client.keys(pattern)
-            if keys:
-                self.redis_client.delete(*keys)
-            logger.info(f"Cleared {len(keys)} cached entries")
+            deleted = 0
+            for key in self.redis_client.scan_iter(match=pattern, count=500):
+                self.redis_client.delete(key)
+                deleted += 1
+            logger.info(f"Cleared {deleted} cached entries")
             return True
         except Exception as e:
             logger.error(f"Failed to clear cache: {e}")

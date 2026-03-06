@@ -99,6 +99,7 @@ class CopernicusTerrainClient:
                 logger.info("AWS S3 session initialized for Copernicus DEM")
             except Exception as e:
                 logger.warning(f"Failed to initialize AWS session: {e}")
+                # TODO: Add retry/backoff and offline cache mode if AWS bootstrap keeps failing.
                 self.use_s3 = False
         
         # Cache for open rasterio datasets
@@ -202,6 +203,7 @@ class CopernicusTerrainClient:
             
         except rasterio.RasterioIOError as e:
             logger.warning(f"Failed to open tile {tile_url}: {e}")
+            # TODO: Separate DNS/auth failures from missing-tile responses for targeted alerting.
             return None
         except Exception as e:
             logger.error(f"Unexpected error opening tile {tile_url}: {e}")
@@ -267,6 +269,7 @@ class CopernicusTerrainClient:
             return None
         except Exception as e:
             logger.error(f"Error reading elevation at ({lat}, {lon}): {e}")
+            # TODO: Convert generic terrain failures into a structured status for upstream callers.
             return None
     
     def get_elevation_batch(
@@ -305,6 +308,7 @@ class CopernicusTerrainClient:
         for tile_url, tile_coords in tile_groups.items():
             dataset = self._open_tile(tile_url)
             if dataset is None:
+                # TODO: Track per-tile cache misses so partial results can still be returned.
                 continue
             
             try:
@@ -353,6 +357,7 @@ class CopernicusTerrainClient:
                 
             except Exception as e:
                 logger.error(f"Error processing tile {tile_url}: {e}")
+                # TODO: Keep current tile results and continue with other tiles when one tile fails.
                 continue
         
         return results
@@ -386,6 +391,7 @@ class CopernicusTerrainClient:
             return self._read_single_tile_patch(tiles_needed[0], bbox)
         
         # For multiple tiles, merge them
+        # TODO: Add strict shape checks so multi-tile raster merges cannot silently misalign at tile boundaries.
         return self._read_multi_tile_patch(tiles_needed, bbox)
     
     def _get_tiles_for_bbox(
@@ -495,6 +501,7 @@ class CopernicusTerrainClient:
         for tile_url in tile_urls:
             dataset = self._open_tile(tile_url)
             if dataset is None:
+                # TODO: Track which source tiles were skipped so output coverage ratio can be reported upstream.
                 continue
             
             try:
@@ -511,7 +518,7 @@ class CopernicusTerrainClient:
                 # Get tile bounds
                 tile_bounds = dataset.bounds
                 
-                # Calculate where this tile fits in output
+                # TODO: Replace the simplified placement logic with rasterio.warp-based reprojection for boundary correctness.
                 # (Simplified - assumes tiles align with output grid)
                 # For production, use rasterio.warp.reproject
                 

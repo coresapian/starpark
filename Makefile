@@ -210,7 +210,39 @@ format: ## Format code
 typecheck: ## Run type checking
 	@echo "$(BLUE)Running type checker...$(NC)"
 	docker-compose -f $(COMPOSE_FILE) -p $(PROJECT_NAME) exec backend mypy .
+	npm --prefix frontend/app run typecheck
+	npm run electron:typecheck
 	@echo "$(GREEN)Type checking complete!$(NC)"
+
+.PHONY: test-math
+test-math: ## Run focused backend math and API regression tests
+	@echo "$(BLUE)Running backend math regression tests...$(NC)"
+	python3 -m pytest -q backend/test_core_math.py backend/test_api.py
+	@echo "$(GREEN)Backend math regression tests complete!$(NC)"
+
+.PHONY: frontend-build
+frontend-build: ## Build the new React/TypeScript mission-control frontend scaffold
+	@echo "$(BLUE)Building typed frontend scaffold...$(NC)"
+	npm --prefix frontend/app run build
+	@echo "$(GREEN)Frontend scaffold build complete!$(NC)"
+
+.PHONY: frontend-typecheck
+frontend-typecheck: ## Typecheck the new React/TypeScript mission-control frontend scaffold
+	@echo "$(BLUE)Typechecking typed frontend scaffold...$(NC)"
+	npm --prefix frontend/app run typecheck
+	@echo "$(GREEN)Frontend scaffold typecheck complete!$(NC)"
+
+.PHONY: electron-typecheck
+electron-typecheck: ## Typecheck the new Electron TypeScript scaffold
+	@echo "$(BLUE)Typechecking Electron scaffold...$(NC)"
+	npm run electron:typecheck
+	@echo "$(GREEN)Electron scaffold typecheck complete!$(NC)"
+
+.PHONY: electron-build
+electron-build: ## Build the emitted Electron preload/settings TypeScript runtime
+	@echo "$(BLUE)Building Electron scaffold runtime...$(NC)"
+	npm run electron:build
+	@echo "$(GREEN)Electron scaffold build complete!$(NC)"
 
 # =============================================================================
 # Utility Commands

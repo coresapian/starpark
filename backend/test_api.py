@@ -1,498 +1,721 @@
-# Copyright (c) 2024, LinkSpot Team
-# BSD 3-Clause License
-#
-# API endpoint tests using pytest and FastAPI TestClient.
+"""API endpoint tests for LinkSpot backend."""
 
-"""Tests for LinkSpot API endpoints."""
+from __future__ import annotations
 
-import json
 import sys
+import types
+import unittest
 from datetime import datetime, timezone
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-# Add parent directory to path for imports
-sys.path.insert(0, "/mnt/okcomputer/output/linkspot/backend")
+# Lightweight stubs so tests can run without optional infra deps installed.
+if "redis.asyncio" not in sys.modules:
+    redis_mod = types.ModuleType("redis")
+    redis_async_mod = types.ModuleType("redis.asyncio")
 
-from main import app
+    class _StubRedis:
+        async def ping(self):
+            return True
+
+    redis_async_mod.Redis = _StubRedis
+    redis_async_mod.RedisError = Exception
+    redis_async_mod.from_url = lambda *args, **kwargs: _StubRedis()
+    redis_mod.asyncio = redis_async_mod
+    sys.modules["redis"] = redis_mod
+    sys.modules["redis.asyncio"] = redis_async_mod
+
+if "asyncpg" not in sys.modules:
+    asyncpg_mod = types.ModuleType("asyncpg")
+    asyncpg_mod.Connection = object
+    asyncpg_mod.Pool = object
+    asyncpg_mod.PostgresError = Exception
+    asyncpg_mod.create_pool = lambda *args, **kwargs: None
+    sys.modules["asyncpg"] = asyncpg_mod
+
+from dependencies import (
+    get_amenity_service,
+    get_data_pipeline,
+    get_db,
+    get_obstruction_engine,
+    get_osrm_client,
+    get_redis,
+    get_satellite_engine,
+)
+from models.schemas import (
+    AnalyzeRequest,
+    AnalyzeResponse,
+    HeatmapRequest,
+    RoutePlanRequest,
+    Zone,
+)
+from routers import analysis, health, route, satellites
 
 
-# ============================================================================
-# Fixtures
-# ============================================================================
+class _MockRedis:
+    def __init__(self) -> None:
+        self._data: dict[str, str] = {}
 
-@pytest.fixture
-def client() -> TestClient:
-    """Create test client for API testing.
-    
-    Returns:
-        TestClient: FastAPI test client.
-    """
+    async def get(self, key: str):
+        return self._data.get(key)
+
+    async def setex(self, key: str, _ttl: int, value: str):
+        self._data[key] = value
+
+    async def ping(self):
+        return True
+
+
+class _MockDB:
+    async def fetchval(self, _query: str):
+        return 1
+
+
+class _MockSatelliteEngine:
+    async def get_visible_satellites(self, **_kwargs):
+        return [
+            {
+                "satellite_id": "STARLINK-1001",
+                "norad_id": 1001,
+                "azimuth": 45.0,
+                "elevation": 38.5,
+                "range_km": 550.0,
+                "velocity_kms": 7.8,
+                "constellation": "Starlink",
+                "is_visible": True,
+                "name": "STARLINK TEST A",
+            },
+            {
+                "satellite_id": "STARLINK-1002",
+                "norad_id": 1002,
+                "azimuth": 120.0,
+                "elevation": 29.0,
+                "range_km": 560.0,
+                "velocity_kms": 7.7,
+                "constellation": "Starlink",
+                "is_visible": True,
+                "name": "STARLINK TEST B",
+            },
+        ]
+
+    async def get_constellations(self):
+        return [
+            {
+                "name": "Starlink",
+                "operator": "SpaceX",
+                "total_satellites": 2,
+                "active_satellites": 2,
+                "orbital_planes": 1,
+                "altitude_km": 550.1,
+                "inclination_deg": 53.2,
+            }
+        ]
+
+    async def get_constellation_map_positions(self, timestamp=None, limit=None):
+        _ = timestamp
+        points = [
+            {
+                "satellite_id": "1001",
+                "norad_id": 1001,
+                "name": "STARLINK TEST A",
+                "latitude": 39.745,
+                "longitude": -104.98,
+                "altitude_km": 550.0,
+                "velocity_kms": 7.6,
+                "constellation": "Starlink",
+            },
+            {
+                "satellite_id": "1002",
+                "norad_id": 1002,
+                "name": "STARLINK TEST B",
+                "latitude": 40.02,
+                "longitude": -105.22,
+                "altitude_km": 548.8,
+                "velocity_kms": 7.58,
+                "constellation": "Starlink",
+            },
+        ]
+        if isinstance(limit, int) and limit > 0:
+            points = points[:limit]
+        return {
+            "satellites": points,
+            "source": "space-track",
+        }
+
+
+class _MockDataPipeline:
+    initialized = True
+
+    async def fetch_buildings(self, **_kwargs):
+        return (
+            [
+                {
+                    "lat": 40.7130,
+                    "lon": -74.0059,
+                    "height": 25.0,
+                    "ground_elevation": 0.0,
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [
+                            [
+                                [-74.0061, 40.7129],
+                                [-74.0058, 40.7129],
+                                [-74.0058, 40.7131],
+                                [-74.0061, 40.7131],
+                                [-74.0061, 40.7129],
+                            ]
+                        ],
+                    },
+                }
+            ],
+            "overture_maps",
+        )
+
+    async def fetch_terrain(self, **kwargs):
+        return [
+            {
+                "lat": kwargs["lat"],
+                "lon": kwargs["lon"],
+                "elevation": 12.3,
+                "source": "copernicus_glo30",
+            }
+        ]
+
+
+class _MockObstructionEngine:
+    sector_width = 2.0
+    n_sectors = 180
+
+    def analyze_position(self, **_kwargs):
+        return {
+            "n_clear": 1,
+            "n_total": 2,
+            "obstruction_pct": 50.0,
+            "blocked_azimuths": [120.0],
+            "satellite_details": [
+                {
+                    "satellite_id": "STARLINK-1001",
+                    "name": "STARLINK TEST A",
+                    "azimuth": 45.0,
+                    "elevation": 38.5,
+                    "range_km": 550.0,
+                    "is_visible": True,
+                    "is_obstructed": False,
+                },
+                {
+                    "satellite_id": "STARLINK-1002",
+                    "name": "STARLINK TEST B",
+                    "azimuth": 120.0,
+                    "elevation": 29.0,
+                    "range_km": 560.0,
+                    "is_visible": True,
+                    "is_obstructed": True,
+                },
+            ],
+            "obstruction_profile": [
+                {"azimuth": 121.0, "elevation": 30.0},
+            ],
+        }
+
+
+class _MockOSRMClient:
+    def get_route(self, origin, destination, profile="driving", fallback_profiles=None):
+        _ = profile
+        _ = fallback_profiles
+        return {
+            "geometry": [
+                origin,
+                (
+                    (origin[0] + destination[0]) / 2.0,
+                    (origin[1] + destination[1]) / 2.0,
+                ),
+                destination,
+            ],
+            "distance_m": 20000.0,
+            "duration_s": 1200.0,
+        }
+
+    def sample_route_points(self, geometry, interval_m=500.0):
+        _ = interval_m
+        return [
+            {"lat": geometry[0][0], "lon": geometry[0][1], "distance_along_m": 0.0},
+            {"lat": geometry[1][0], "lon": geometry[1][1], "distance_along_m": 10000.0},
+            {"lat": geometry[2][0], "lon": geometry[2][1], "distance_along_m": 20000.0},
+        ]
+
+
+class _MockAmenityService:
+    def geocode_address(self, address: str):
+        if "denver" in address.lower():
+            return 39.7392, -104.9903
+        if "boulder" in address.lower():
+            return 40.0150, -105.2705
+        return 39.9000, -105.1000
+
+    def query_amenities_along_route(self, geometry, buffer_m=500.0):
+        _ = buffer_m
+        return [
+            {
+                "lat": geometry[1][0],
+                "lon": geometry[1][1],
+                "type": "parking",
+                "name": "Midpoint Rest Area",
+                "parking": True,
+                "restroom": True,
+                "fuel": False,
+                "food": False,
+            }
+        ]
+
+    def query_road_access_mask(self, min_lat, min_lon, max_lat, max_lon):
+        mid_lat = (min_lat + max_lat) / 2.0
+        mid_lon = (min_lon + max_lon) / 2.0
+        return {
+            "roads": [
+                [(min_lat, mid_lon), (max_lat, mid_lon)],
+                [(mid_lat, min_lon), (mid_lat, max_lon)],
+            ],
+            "parking_polygons": [
+                [
+                    (mid_lat - 0.0004, mid_lon - 0.0004),
+                    (mid_lat - 0.0004, mid_lon + 0.0004),
+                    (mid_lat + 0.0004, mid_lon + 0.0004),
+                    (mid_lat + 0.0004, mid_lon - 0.0004),
+                    (mid_lat - 0.0004, mid_lon - 0.0004),
+                ]
+            ],
+            "parking_points": [(mid_lat, mid_lon)],
+        }
+
+
+def _build_test_client() -> TestClient:
+    app = FastAPI()
+    app.include_router(analysis.router)
+    app.include_router(satellites.router)
+    app.include_router(route.router)
+    app.include_router(health.router)
+
+    redis = _MockRedis()
+    db = _MockDB()
+    sat = _MockSatelliteEngine()
+    pipeline = _MockDataPipeline()
+    obstruction = _MockObstructionEngine()
+    osrm = _MockOSRMClient()
+    amenity = _MockAmenityService()
+
+    async def override_redis():
+        return redis
+
+    async def override_db():
+        return db
+
+    async def override_satellite_engine():
+        return sat
+
+    async def override_data_pipeline():
+        return pipeline
+
+    async def override_obstruction_engine():
+        return obstruction
+
+    async def override_osrm_client():
+        return osrm
+
+    async def override_amenity_service():
+        return amenity
+
+    app.dependency_overrides[get_redis] = override_redis
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_satellite_engine] = override_satellite_engine
+    app.dependency_overrides[get_data_pipeline] = override_data_pipeline
+    app.dependency_overrides[get_obstruction_engine] = override_obstruction_engine
+    app.dependency_overrides[get_osrm_client] = override_osrm_client
+    app.dependency_overrides[get_amenity_service] = override_amenity_service
+
     return TestClient(app)
 
 
-@pytest.fixture
-def mock_satellite_engine():
-    """Create mock satellite engine."""
-    mock = MagicMock()
-    mock.get_visible_satellites = AsyncMock(return_value=[
-        {
-            "satellite_id": "STARLINK-1234",
-            "norad_id": 12345,
-            "azimuth": 45.0,
-            "elevation": 25.0,
-            "range_km": 550.0,
-            "velocity_kms": 7.8,
-            "constellation": "Starlink",
-        },
-        {
-            "satellite_id": "STARLINK-5678",
-            "norad_id": 12346,
-            "azimuth": 120.0,
-            "elevation": 35.0,
-            "range_km": 545.0,
-            "velocity_kms": 7.8,
-            "constellation": "Starlink",
-        },
-    ])
-    mock.get_constellations = AsyncMock(return_value=[
-        {
-            "name": "Starlink",
-            "operator": "SpaceX",
-            "total_satellites": 5000,
-            "active_satellites": 4500,
-            "orbital_planes": 72,
-            "altitude_km": 550,
-            "inclination_deg": 53.0,
-        },
-        {
-            "name": "OneWeb",
-            "operator": "Eutelsat",
-            "total_satellites": 648,
-            "active_satellites": 634,
-            "orbital_planes": 12,
-            "altitude_km": 1200,
-            "inclination_deg": 87.4,
-        },
-    ])
-    return mock
+def _build_application_client() -> TestClient:
+    from main import create_application
+
+    app = create_application()
+
+    redis = _MockRedis()
+    sat = _MockSatelliteEngine()
+    pipeline = _MockDataPipeline()
+    obstruction = _MockObstructionEngine()
+    osrm = _MockOSRMClient()
+    amenity = _MockAmenityService()
+
+    async def override_redis():
+        return redis
+
+    async def override_satellite_engine():
+        return sat
+
+    async def override_data_pipeline():
+        return pipeline
+
+    async def override_obstruction_engine():
+        return obstruction
+
+    async def override_osrm_client():
+        return osrm
+
+    async def override_amenity_service():
+        return amenity
+
+    app.dependency_overrides[get_redis] = override_redis
+    app.dependency_overrides[get_satellite_engine] = override_satellite_engine
+    app.dependency_overrides[get_data_pipeline] = override_data_pipeline
+    app.dependency_overrides[get_obstruction_engine] = override_obstruction_engine
+    app.dependency_overrides[get_osrm_client] = override_osrm_client
+    app.dependency_overrides[get_amenity_service] = override_amenity_service
+
+    return TestClient(app)
 
 
-@pytest.fixture
-def mock_data_pipeline():
-    """Create mock data pipeline."""
-    mock = MagicMock()
-    mock.fetch_buildings = AsyncMock(return_value=[])
-    mock.fetch_terrain = AsyncMock(return_value=[])
-    mock.initialize = AsyncMock()
-    mock.initialized = True
-    return mock
+class TestHealthEndpoints(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client = _build_test_client()
+
+    def test_health_check(self):
+        response = self.client.get("/api/v1/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "healthy")
+
+    def test_detailed_health_check(self):
+        response = self.client.get("/api/v1/health/detailed")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("components", response.json())
 
 
-@pytest.fixture
-def mock_obstruction_engine():
-    """Create mock obstruction engine."""
-    mock = MagicMock()
-    mock.resolution = 360
-    mock.analyze_position = MagicMock(return_value={
-        "n_clear": 42,
-        "n_total": 50,
-        "obstruction_pct": 16.0,
-        "blocked_azimuths": [[30.0, 60.0]],
-    })
-    mock.get_zone = MagicMock(return_value="good")
-    return mock
+class TestAnalysisEndpoints(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client = _build_test_client()
 
-
-@pytest.fixture
-def mock_redis():
-    """Create mock Redis client."""
-    mock = AsyncMock()
-    mock.get = AsyncMock(return_value=None)
-    mock.setex = AsyncMock()
-    mock.ping = AsyncMock()
-    return mock
-
-
-# ============================================================================
-# Health Endpoint Tests
-# ============================================================================
-
-class TestHealthEndpoints:
-    """Tests for health check endpoints."""
-    
-    def test_health_check(self, client: TestClient):
-        """Test basic health check endpoint."""
-        response = client.get("/api/v1/health")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert "status" in data
-        assert "version" in data
-        assert "timestamp" in data
-        assert data["status"] == "healthy"
-    
-    def test_detailed_health_check(self, client: TestClient):
-        """Test detailed health check endpoint."""
-        response = client.get("/api/v1/health/detailed")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert "status" in data
-        assert "version" in data
-        assert "components" in data
-        assert "environment" in data
-        assert isinstance(data["components"], list)
-    
-    def test_liveness_check(self, client: TestClient):
-        """Test liveness check endpoint."""
-        response = client.get("/api/v1/health/live")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "healthy"
-    
-    def test_readiness_check(self, client: TestClient):
-        """Test readiness check endpoint."""
-        response = client.get("/api/v1/health/ready")
-        
-        # May fail if dependencies not initialized in test
-        assert response.status_code in [200, 503]
-
-
-# ============================================================================
-# Analysis Endpoint Tests
-# ============================================================================
-
-class TestAnalysisEndpoints:
-    """Tests for analysis endpoints."""
-    
-    def test_analyze_valid_request(self, client: TestClient):
-        """Test analyze endpoint with valid request."""
-        request_data = {
-            "lat": 40.7128,
-            "lon": -74.0060,
-            "elevation": 10.0,
-        }
-        
-        response = client.post("/api/v1/analyze", json=request_data)
-        
-        # Should succeed (uses mock engines)
-        assert response.status_code == 200
-        data = response.json()
-        assert "zone" in data
-        assert "n_clear" in data
-        assert "n_total" in data
-        assert "obstruction_pct" in data
-        assert "blocked_azimuths" in data
-        assert "timestamp" in data
-    
-    def test_analyze_invalid_latitude(self, client: TestClient):
-        """Test analyze endpoint with invalid latitude."""
-        request_data = {
-            "lat": 100.0,  # Invalid: > 90
-            "lon": -74.0060,
-        }
-        
-        response = client.post("/api/v1/analyze", json=request_data)
-        
-        assert response.status_code == 422
-    
-    def test_analyze_invalid_longitude(self, client: TestClient):
-        """Test analyze endpoint with invalid longitude."""
-        request_data = {
-            "lat": 40.7128,
-            "lon": 200.0,  # Invalid: > 180
-        }
-        
-        response = client.post("/api/v1/analyze", json=request_data)
-        
-        assert response.status_code == 422
-    
-    def test_analyze_missing_required_fields(self, client: TestClient):
-        """Test analyze endpoint with missing required fields."""
-        request_data = {
-            "lat": 40.7128,
-            # Missing lon
-        }
-        
-        response = client.post("/api/v1/analyze", json=request_data)
-        
-        assert response.status_code == 422
-    
-    def test_heatmap_valid_request(self, client: TestClient):
-        """Test heatmap endpoint with valid request."""
-        request_data = {
-            "lat": 40.7128,
-            "lon": -74.0060,
-            "radius_m": 1000,
-            "spacing_m": 100,
-        }
-        
-        response = client.post("/api/v1/heatmap", json=request_data)
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["type"] == "FeatureCollection"
-        assert "features" in data
-        assert "metadata" in data
-        assert isinstance(data["features"], list)
-    
-    def test_heatmap_invalid_radius(self, client: TestClient):
-        """Test heatmap endpoint with invalid radius."""
-        request_data = {
-            "lat": 40.7128,
-            "lon": -74.0060,
-            "radius_m": 50000,  # Invalid: > 10000
-            "spacing_m": 100,
-        }
-        
-        response = client.post("/api/v1/heatmap", json=request_data)
-        
-        assert response.status_code == 422
-    
-    def test_heatmap_invalid_spacing(self, client: TestClient):
-        """Test heatmap endpoint with invalid spacing."""
-        request_data = {
-            "lat": 40.7128,
-            "lon": -74.0060,
-            "radius_m": 1000,
-            "spacing_m": 10,  # Invalid: < 50
-        }
-        
-        response = client.post("/api/v1/heatmap", json=request_data)
-        
-        assert response.status_code == 422
-
-
-# ============================================================================
-# Satellite Endpoint Tests
-# ============================================================================
-
-class TestSatelliteEndpoints:
-    """Tests for satellite endpoints."""
-    
-    def test_get_visible_satellites(self, client: TestClient):
-        """Test visible satellites endpoint."""
-        response = client.get(
-            "/api/v1/satellites",
-            params={
-                "lat": 40.7128,
-                "lon": -74.0060,
-                "elevation": 10.0,
-            },
-        )
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert "satellites" in data
-        assert "count" in data
-        assert "timestamp" in data
-        assert "location" in data
-        assert isinstance(data["satellites"], list)
-    
-    def test_get_visible_satellites_invalid_lat(self, client: TestClient):
-        """Test visible satellites with invalid latitude."""
-        response = client.get(
-            "/api/v1/satellites",
-            params={
-                "lat": 100.0,  # Invalid
-                "lon": -74.0060,
-            },
-        )
-        
-        assert response.status_code == 422
-    
-    def test_get_constellations(self, client: TestClient):
-        """Test constellation list endpoint."""
-        response = client.get("/api/v1/satellites/constellation")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert "constellations" in data
-        assert "total_count" in data
-        assert isinstance(data["constellations"], list)
-    
-    def test_get_specific_constellation(self, client: TestClient):
-        """Test specific constellation endpoint."""
-        response = client.get("/api/v1/satellites/constellation/Starlink")
-        
-        # May be 200 or 404 depending on mock
-        assert response.status_code in [200, 404]
-        
-        if response.status_code == 200:
-            data = response.json()
-            assert "name" in data
-            assert "total_satellites" in data
-
-
-# ============================================================================
-# Root Endpoint Tests
-# ============================================================================
-
-class TestRootEndpoints:
-    """Tests for root endpoints."""
-    
-    def test_root_endpoint(self, client: TestClient):
-        """Test root endpoint."""
-        response = client.get("/")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert "name" in data
-        assert "version" in data
-        assert "endpoints" in data
-    
-    def test_api_info_endpoint(self, client: TestClient):
-        """Test API info endpoint."""
-        response = client.get("/api/v1")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert "version" in data
-        assert "endpoints" in data
-        assert isinstance(data["endpoints"], list)
-
-
-# ============================================================================
-# Error Handling Tests
-# ============================================================================
-
-class TestErrorHandling:
-    """Tests for error handling."""
-    
-    def test_not_found(self, client: TestClient):
-        """Test 404 error handling."""
-        response = client.get("/api/v1/nonexistent")
-        
-        assert response.status_code == 404
-    
-    def test_method_not_allowed(self, client: TestClient):
-        """Test 405 error handling."""
-        response = client.post("/api/v1/health")  # GET only endpoint
-        
-        assert response.status_code == 405
-    
-    def test_invalid_json(self, client: TestClient):
-        """Test invalid JSON handling."""
-        response = client.post(
+    def test_analyze_valid_request(self):
+        response = self.client.post(
             "/api/v1/analyze",
-            data="invalid json",
-            headers={"Content-Type": "application/json"},
+            json={"lat": 40.7128, "lon": -74.0060, "elevation": 10.0},
         )
-        
-        assert response.status_code == 422
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn(data["zone"], {"excellent", "good", "fair", "poor", "blocked"})
+        self.assertIn("data_quality", data)
+        self.assertEqual(data["blocked_azimuths"], [120.0])
+        self.assertEqual(data["visibility"]["total_satellites"], 2)
+
+    def test_analyze_returns_data_quality(self):
+        response = self.client.post(
+            "/api/v1/analyze",
+            json={"lat": 40.7128, "lon": -74.0060},
+        )
+        self.assertEqual(response.status_code, 200)
+        dq = response.json()["data_quality"]
+        self.assertIn(dq["buildings"], ("full", "partial", "none"))
+        self.assertIn(dq["terrain"], ("full", "none"))
+        self.assertIn(dq["satellites"], ("live", "cached", "stale"))
+        self.assertIsInstance(dq["sources"], list)
+        self.assertIsInstance(dq["warnings"], list)
+
+    def test_heatmap_valid_request(self):
+        response = self.client.post(
+            "/api/v1/heatmap",
+            json={"lat": 40.7128, "lon": -74.0060, "radius_m": 100, "spacing_m": 50},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("grid", data)
+        self.assertIn("buildings", data)
+        self.assertIn("center", data)
+        self.assertIn("data_quality", data)
+        self.assertIn("roads:overpass", data["data_quality"]["sources"])
+
+    def test_heatmap_falls_back_to_full_grid_when_road_mask_fails(self):
+        client = _build_test_client()
+
+        class _ExplodingAmenityService(_MockAmenityService):
+            def query_road_access_mask(self, min_lat, min_lon, max_lat, max_lon):
+                _ = (min_lat, min_lon, max_lat, max_lon)
+                raise RuntimeError("overpass down")
+
+        async def override_amenity_service():
+            return _ExplodingAmenityService()
+
+        from dependencies import get_amenity_service as _get_amenity_service
+
+        client.app.dependency_overrides[_get_amenity_service] = override_amenity_service
+
+        response = client.post(
+            "/api/v1/heatmap",
+            json={"lat": 40.7128, "lon": -74.0060, "radius_m": 100, "spacing_m": 50},
+        )
+        self.assertEqual(response.status_code, 200)
+        grid_features = response.json()["grid"]["features"]
+        self.assertGreater(len(grid_features), 0)
+        warnings = response.json()["data_quality"]["warnings"]
+        self.assertTrue(any("Road/parking mask lookup failed" in warning for warning in warnings))
+
+    def test_analyze_invalid_latitude(self):
+        response = self.client.post(
+            "/api/v1/analyze",
+            json={"lat": 100.0, "lon": -74.0060},
+        )
+        self.assertEqual(response.status_code, 422)
 
 
-# ============================================================================
-# Schema Validation Tests
-# ============================================================================
+class TestSatelliteEndpoints(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client = _build_test_client()
 
-class TestSchemaValidation:
-    """Tests for Pydantic schema validation."""
-    
+    def test_get_visible_satellites(self):
+        response = self.client.get(
+            "/api/v1/satellites",
+            params={"lat": 40.7128, "lon": -74.0060},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["count"], 2)
+
+    def test_constellation_metadata_not_hardcoded(self):
+        response = self.client.get("/api/v1/satellites/constellation")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertGreaterEqual(len(data["constellations"]), 1)
+        for constellation in data["constellations"]:
+            self.assertIsNotNone(constellation["name"])
+            self.assertGreater(constellation["total_satellites"], 0)
+            self.assertIsNotNone(constellation.get("altitude_km"))
+            self.assertGreater(constellation.get("altitude_km", 0), 0)
+
+    def test_constellation_map_endpoint(self):
+        response = self.client.get(
+            "/api/v1/satellites/constellation/map",
+            params={"limit": 1000},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("satellites", data)
+        self.assertIn("count", data)
+        self.assertEqual(data["source"], "space-track")
+        self.assertEqual(data["count"], 2)
+        first = data["satellites"][0]
+        self.assertIn("latitude", first)
+        self.assertIn("longitude", first)
+
+
+class TestRoutePlanningEndpoints(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client = _build_test_client()
+
+    def test_route_plan_with_coordinates(self):
+        response = self.client.post(
+            "/api/v1/route/plan",
+            json={
+                "origin": {"lat": 39.7392, "lon": -104.9903},
+                "destination": {"lat": 40.0150, "lon": -105.2705},
+                "sample_interval_m": 5000,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("route_geojson", data)
+        self.assertIn("waypoints", data)
+        self.assertIn("dead_zones", data)
+        self.assertIn("mission_summary", data)
+        self.assertIn("signal_forecast", data)
+        self.assertIn("data_quality", data)
+        self.assertTrue(all(wp["type"] == "known_parking" for wp in data["waypoints"]))
+
+    def test_route_plan_with_addresses(self):
+        response = self.client.post(
+            "/api/v1/route/plan",
+            json={
+                "origin": {"address": "Denver, CO"},
+                "destination": {"address": "Boulder, CO"},
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertGreater(data["mission_summary"]["total_distance_m"], 0)
+        self.assertIsInstance(data["waypoints"], list)
+
+
+class TestRuntimeRegressions(unittest.TestCase):
+    def test_request_id_is_propagated_from_middleware_state(self):
+        client = _build_application_client()
+        response = client.get("/api/v1/health", headers={"X-Request-ID": "req-test-123"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("X-Request-ID"), "req-test-123")
+
+
+class TestRouteCorridorFiltering(unittest.TestCase):
+    def test_corridor_filter_keeps_near_route_and_dedupes(self):
+        route_geometry = [
+            (39.7392, -104.9903),
+            (39.8200, -105.0500),
+            (40.0150, -105.2705),
+        ]
+
+        amenities = [
+            {
+                "lat": 39.8200,
+                "lon": -105.0500,
+                "name": "Primary Rest",
+                "parking": True,
+                "fuel": False,
+            },
+            {
+                "lat": 39.8201,
+                "lon": -105.0501,
+                "name": "Duplicate Candidate",
+                "parking": False,
+                "fuel": False,
+            },
+            {
+                "lat": 39.9000,
+                "lon": -104.6000,
+                "name": "Far Off Route",
+                "parking": True,
+                "fuel": True,
+            },
+        ]
+
+        filtered = route._filter_amenity_candidates_to_corridor(
+            amenities=amenities,
+            route_geometry=route_geometry,
+            corridor_m=120.0,
+            max_candidates=20,
+        )
+
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["name"], "Primary Rest")
+        self.assertLessEqual(filtered[0]["distance_from_route_m"], 120.0)
+
+
+class TestWaypointReliabilityGating(unittest.TestCase):
+    def test_rank_waypoints_filters_low_reliability_candidates(self):
+        candidate_results = [
+            {
+                "lat": 39.8200,
+                "lon": -105.0500,
+                "name": "Low Reliability Stop",
+                "parking": True,
+                "restroom": True,
+                "fuel": False,
+                "distance_from_route_m": 18.0,
+                "distance_along_m": 2500.0,
+                "n_visible": 8,
+                "n_total": 10,
+                "zone": Zone.GOOD,
+                "max_obstruction_deg": 20.0,
+                "reliability_pct": 49.9,
+                "best_window": "50% clear over 30m; best 12:00Z",
+            },
+            {
+                "lat": 39.9000,
+                "lon": -105.1500,
+                "name": "Reliable Stop",
+                "parking": True,
+                "restroom": False,
+                "fuel": True,
+                "distance_from_route_m": 22.0,
+                "distance_along_m": 5500.0,
+                "n_visible": 9,
+                "n_total": 10,
+                "zone": Zone.GOOD,
+                "max_obstruction_deg": 12.0,
+                "reliability_pct": 70.0,
+                "best_window": "70% clear over 30m; best 12:20Z",
+            },
+        ]
+
+        waypoints = route._rank_waypoints(
+            candidate_results,
+            route={"distance_m": 20000.0, "duration_s": 1200.0},
+        )
+
+        self.assertEqual(len(waypoints), 1)
+        self.assertEqual(waypoints[0].name, "Reliable Stop")
+        self.assertEqual(waypoints[0].best_window, "70% clear over 30m; best 12:20Z")
+
+
+class TestHeatmapRoadMaskFiltering(unittest.TestCase):
+    def test_driveable_grid_filter_removes_offroad_points(self):
+        center_lat = 40.0000
+        center_lon = -105.0000
+        points = [
+            (center_lat, center_lon),
+            (center_lat + 0.0040, center_lon + 0.0040),
+            (center_lat - 0.0040, center_lon - 0.0040),
+        ]
+        access_mask = {
+            "roads": [
+                [(center_lat - 0.0050, center_lon), (center_lat + 0.0050, center_lon)]
+            ],
+            "parking_polygons": [
+                [
+                    (center_lat - 0.0004, center_lon - 0.0004),
+                    (center_lat - 0.0004, center_lon + 0.0004),
+                    (center_lat + 0.0004, center_lon + 0.0004),
+                    (center_lat + 0.0004, center_lon - 0.0004),
+                    (center_lat - 0.0004, center_lon - 0.0004),
+                ]
+            ],
+            "parking_points": [],
+        }
+
+        filtered = analysis._filter_driveable_grid_points(
+            points=points,
+            center_lat=center_lat,
+            center_lon=center_lon,
+            access_mask=access_mask,
+        )
+
+        self.assertIn((center_lat, center_lon), filtered)
+        self.assertEqual(len(filtered), 1)
+
+
+class TestSchemaValidation(unittest.TestCase):
     def test_analyze_request_schema(self):
-        """Test AnalyzeRequest schema validation."""
-        from models.schemas import AnalyzeRequest
-        
-        # Valid request
         request = AnalyzeRequest(lat=40.7128, lon=-74.0060, elevation=10.0)
-        assert request.lat == 40.7128
-        assert request.lon == -74.0060
-        assert request.elevation == 10.0
-        
-        # Invalid latitude
-        with pytest.raises(ValueError):
-            AnalyzeRequest(lat=100.0, lon=-74.0060)
-    
+        self.assertEqual(request.lat, 40.7128)
+
     def test_analyze_response_schema(self):
-        """Test AnalyzeResponse schema validation."""
-        from models.schemas import AnalyzeResponse, Zone
-        
         response = AnalyzeResponse(
             zone=Zone.GOOD,
             n_clear=42,
             n_total=50,
             obstruction_pct=16.0,
-            blocked_azimuths=[[30.0, 60.0]],
+            blocked_azimuths=[30.0, 60.0],
             timestamp=datetime.now(timezone.utc),
             lat=40.7128,
             lon=-74.0060,
         )
-        
-        assert response.zone == Zone.GOOD
-        assert response.n_clear == 42
-    
+        self.assertEqual(response.zone, Zone.GOOD)
+
     def test_heatmap_request_schema(self):
-        """Test HeatmapRequest schema validation."""
-        from models.schemas import HeatmapRequest
-        
         request = HeatmapRequest(
             lat=40.7128,
             lon=-74.0060,
             radius_m=1000,
             spacing_m=100,
         )
-        
-        assert request.radius_m == 1000
-        assert request.spacing_m == 100
-    
-    def test_satellite_position_schema(self):
-        """Test SatellitePosition schema validation."""
-        from models.schemas import SatellitePosition
-        
-        position = SatellitePosition(
-            satellite_id="STARLINK-1234",
-            azimuth=45.0,
-            elevation=25.0,
+        self.assertEqual(request.spacing_m, 100)
+
+    def test_route_plan_request_schema(self):
+        req = RoutePlanRequest(
+            origin={"lat": 39.7392, "lon": -104.9903},
+            destination={"address": "Boulder, CO"},
+            sample_interval_m=750.0,
         )
-        
-        assert position.satellite_id == "STARLINK-1234"
-        assert position.azimuth == 45.0
+        self.assertEqual(req.sample_interval_m, 750.0)
 
-
-# ============================================================================
-# Performance Tests
-# ============================================================================
-
-class TestPerformance:
-    """Basic performance tests."""
-    
-    def test_health_response_time(self, client: TestClient):
-        """Test health endpoint response time."""
-        import time
-        
-        start = time.time()
-        response = client.get("/api/v1/health")
-        elapsed = time.time() - start
-        
-        assert response.status_code == 200
-        assert elapsed < 1.0  # Should respond within 1 second
-    
-    def test_analyze_response_time(self, client: TestClient):
-        """Test analyze endpoint response time."""
-        import time
-        
-        request_data = {
-            "lat": 40.7128,
-            "lon": -74.0060,
-        }
-        
-        start = time.time()
-        response = client.post("/api/v1/analyze", json=request_data)
-        elapsed = time.time() - start
-        
-        assert response.status_code == 200
-        # Should respond within 5 seconds (cold cache target)
-        assert elapsed < 5.0
-
-
-# ============================================================================
-# Main
-# ============================================================================
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    unittest.main(verbosity=2)

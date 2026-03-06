@@ -83,6 +83,7 @@ services:
       
       # Application Settings
       APP_ENV: ${APP_ENV:-development}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DEBUG: ${DEBUG:-true}
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-false}
@@ -135,15 +136,6 @@ services:
       dockerfile: Dockerfile
     container_name: linkspot-frontend
     restart: unless-stopped
-    entrypoint: ["nginx", "-g", "daemon off;"]
-    environment:
-      # Pass through API URL for nginx config
-      BACKEND_URL: http://backend:8000
-    volumes:
-      # Development: mount source for live changes
-      - ./frontend:/usr/share/nginx/html:cached
-      # Custom nginx config
-      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "80:80"
     networks:

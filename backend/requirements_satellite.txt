@@ -12,9 +12,6 @@
 # Provides SGP4 propagation, coordinate transformations, and time handling
 skyfield>=1.46.0
 
-# SGP4 propagation (included with skyfield but explicit for clarity)
-sgp4>=2.23
-
 # Redis client for TLE caching
 redis>=5.0.0
 

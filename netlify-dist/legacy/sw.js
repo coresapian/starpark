@@ -1,0 +1,336 @@
+/**
+ * LinkSpot Service Worker
+ * Provides offline caching and network-first API strategies
+ * @version 1.0.0
+ */
+
+const CACHE_VERSION = 'v5';
+const STATIC_CACHE = `linkspot-static-${CACHE_VERSION}`;
+const API_CACHE = `linkspot-api-${CACHE_VERSION}`;
+const STATIC_MAX_BYTES = 1_500_000;
+
+// Static assets to cache on install
+const STATIC_ASSETS = [
+    '/',
+    '/index.html',
+    '/css/styles.css',
+    '/js/app.js',
+    '/js/api-client.js',
+    '/js/sky-plot.js',
+    '/js/effects.js',
+    '/js/status-bar.js',
+    '/js/command-panel.js',
+    '/js/intel-panel.js',
+    '/js/route-renderer.js',
+    '/manifest.json',
+    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
+    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
+    'https://unpkg.com/lucide@latest/dist/umd/lucide.js'
+];
+
+// API routes that should use network-first strategy
+const API_ROUTES = [
+    '/api/v1/analyze',
+    '/api/v1/heatmap',
+    '/api/v1/route/',
+    '/api/v1/satellites',
+    '/api/v1/health'
+];
+
+/**
+ * Check if a URL is an API request
+ * @param {string} url - URL to check
+ * @returns {boolean} True if URL is an API endpoint
+ */
+function isApiRequest(url) {
+    try {
+        const parsed = new URL(url);
+        return API_ROUTES.some(route => parsed.pathname.startsWith(route));
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Check if a URL is a static asset
+ * @param {string} url - URL to check
+ * @returns {boolean} True if URL is a static asset
+ */
+function isStaticAsset(url) {
+    const normalized = url.split('?')[0];
+    return STATIC_ASSETS.some(asset => url.includes(asset)) ||
+           normalized.endsWith('.css') ||
+           normalized.endsWith('.js') ||
+           normalized.endsWith('.png') ||
+           normalized.endsWith('.jpg') ||
+           normalized.endsWith('.svg') ||
+           normalized.endsWith('.json');
+}
+
+function cacheKeyForRequest(request) {
+    const url = new URL(request.url);
+    const params = Array.from(url.searchParams.entries()).sort(([a], [b]) => a.localeCompare(b));
+    url.search = new URLSearchParams(params).toString();
+    return new Request(url.toString(), { method: 'GET' });
+}
+
+async function fetchWithTimeout(request, timeoutMs = 12000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(request, { signal: controller.signal });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// Install event - cache static assets
+self.addEventListener('install', (event) => {
+    console.log('[SW] Installing...');
+    
+    event.waitUntil(
+        caches.open(STATIC_CACHE)
+            .then(cache => {
+                console.log('[SW] Caching static assets');
+                return cache.addAll(STATIC_ASSETS);
+            })
+            .then(() => {
+                console.log('[SW] Static assets cached');
+                return self.skipWaiting();
+            })
+            .catch(error => {
+                console.error('[SW] Cache failed:', error);
+            })
+    );
+});
+
+// Activate event - clean up old caches
+self.addEventListener('activate', (event) => {
+    console.log('[SW] Activating...');
+    
+    event.waitUntil(
+        caches.keys()
+            .then(cacheNames => {
+                return Promise.all(
+                    cacheNames
+                        .filter(name => {
+                            return name.startsWith('linkspot-') && 
+                                   name !== STATIC_CACHE && 
+                                   name !== API_CACHE;
+                        })
+                        .map(name => {
+                            console.log('[SW] Deleting old cache:', name);
+                            return caches.delete(name);
+                        })
+                );
+            })
+            .then(() => {
+                console.log('[SW] Claiming clients');
+                return self.clients.claim();
+            })
+    );
+});
+
+// Fetch event - handle requests with appropriate strategies
+self.addEventListener('fetch', (event) => {
+    const { request } = event;
+    const url = new URL(request.url);
+    
+    // Skip non-GET requests for API (POST handled separately)
+    if (request.method !== 'GET' && !isApiRequest(url.href)) {
+        return;
+    }
+    
+    // API requests: Network-first with cache fallback
+    if (isApiRequest(url.href)) {
+        event.respondWith(networkFirstStrategy(request));
+        return;
+    }
+    
+    // Static assets: Cache-first with network fallback
+    if (isStaticAsset(url.href)) {
+        event.respondWith(cacheFirstStrategy(request));
+        return;
+    }
+    
+    // Default: Network with cache fallback
+    event.respondWith(networkWithCacheFallback(request));
+});
+
+/**
+ * Network-first strategy for API calls
+ * Tries network first, falls back to cache if offline
+ * @param {Request} request - Fetch request
+ * @returns {Promise<Response>} Response from network or cache
+ */
+async function networkFirstStrategy(request) {
+    const cacheKey = cacheKeyForRequest(request);
+    try {
+        const networkResponse = await fetchWithTimeout(request, 12000);
+        
+        if (request.method === 'GET' && networkResponse.ok) {
+            // Cache successful API responses
+            try {
+                const cache = await caches.open(API_CACHE);
+                await cache.put(cacheKey, networkResponse.clone());
+            } catch (cacheError) {
+                console.warn('[SW] API cache write skipped:', cacheError);
+            }
+        }
+        
+        return networkResponse;
+    } catch (error) {
+        console.log('[SW] Network failed, trying cache:', request.url);
+        
+        const cachedResponse = request.method === 'GET'
+            ? await caches.match(cacheKey)
+            : null;
+        
+        if (cachedResponse) {
+            // Add header to indicate cached response
+            const headers = new Headers(cachedResponse.headers);
+            headers.set('X-SW-Cached', 'true');
+            
+            return new Response(cachedResponse.body, {
+                status: cachedResponse.status,
+                statusText: cachedResponse.statusText,
+                headers: headers
+            });
+        }
+        
+        // Return offline response for API
+        return new Response(
+            JSON.stringify({
+                error: 'Offline',
+                message: 'You are currently offline. Please check your connection.',
+                cached: false
+            }),
+            {
+                status: 503,
+                headers: { 'Content-Type': 'application/json' }
+            }
+        );
+    }
+}
+
+/**
+ * Cache-first strategy for static assets
+ * @param {Request} request - Fetch request
+ * @returns {Promise<Response>} Response from cache or network
+ */
+async function cacheFirstStrategy(request) {
+    const cacheKey = cacheKeyForRequest(request);
+    const cachedResponse = await caches.match(cacheKey);
+    
+    if (cachedResponse) {
+        (async () => {
+            try {
+                const networkResponse = await fetchWithTimeout(request, 10000);
+                if (networkResponse.ok) {
+                    const contentLength = Number(networkResponse.headers.get('content-length') || '0');
+                    if (!contentLength || contentLength <= STATIC_MAX_BYTES) {
+                        const cache = await caches.open(STATIC_CACHE);
+                        await cache.put(cacheKey, networkResponse.clone());
+                    }
+                }
+            } catch (_error) {
+                // Background refresh failures are ignored.
+            }
+        })();
+        return cachedResponse;
+    }
+    
+    try {
+        const networkResponse = await fetchWithTimeout(request, 10000);
+        
+        if (networkResponse.ok) {
+            const contentLength = Number(networkResponse.headers.get('content-length') || '0');
+            if (!contentLength || contentLength <= STATIC_MAX_BYTES) {
+                const cache = await caches.open(STATIC_CACHE);
+                cache.put(cacheKey, networkResponse.clone());
+            }
+        }
+        
+        return networkResponse;
+    } catch (error) {
+        console.error('[SW] Fetch failed:', error);
+        throw error;
+    }
+}
+
+/**
+ * Network with cache fallback
+ * @param {Request} request - Fetch request
+ * @returns {Promise<Response>} Response from network or cache
+ */
+async function networkWithCacheFallback(request) {
+    try {
+        const networkResponse = await fetchWithTimeout(request, 12000);
+        return networkResponse;
+    } catch (error) {
+        const cachedResponse = await caches.match(cacheKeyForRequest(request));
+        
+        if (cachedResponse) {
+            return cachedResponse;
+        }
+
+        return new Response(
+            '<!doctype html><html><body><h1>Offline</h1><p>Resource unavailable while offline.</p></body></html>',
+            { status: 503, headers: { 'Content-Type': 'text/html' } }
+        );
+    }
+}
+
+// Background sync for offline form submissions
+self.addEventListener('sync', (event) => {
+    if (event.tag === 'sync-analysis-requests') {
+        event.waitUntil(syncAnalysisRequests());
+    }
+});
+
+/**
+ * Sync pending analysis requests when back online
+ */
+async function syncAnalysisRequests() {
+    // Implementation for background sync
+    // Would retrieve pending requests from IndexedDB and send them
+    console.log('[SW] Syncing analysis requests...');
+}
+
+// Push notification support (future feature)
+self.addEventListener('push', (event) => {
+    if (event.data) {
+        const data = event.data.json();
+        
+        event.waitUntil(
+            self.registration.showNotification(data.title, {
+                body: data.body,
+                icon: 'assets/icon-192.png',
+                badge: 'assets/badge-72.png',
+                data: data.data
+            })
+        );
+    }
+});
+
+// Notification click handler
+self.addEventListener('notificationclick', (event) => {
+    event.notification.close();
+    
+    event.waitUntil(
+        clients.openWindow(event.notification.data?.url || '/')
+    );
+});
+
+// Message handler from main thread
+self.addEventListener('message', (event) => {
+    if (event.data === 'skipWaiting') {
+        self.skipWaiting();
+    }
+    
+    if (event.data.type === 'CACHE_ASSETS') {
+        caches.open(STATIC_CACHE).then(cache => {
+            cache.addAll(event.data.assets);
+        });
+    }
+});

@@ -2,6 +2,7 @@ node_modules/
 *.pyc
 __pycache__/
 .env
+.env.selfhost
 *.egg-info/
 dist/
 build/
@@ -9,3 +10,6 @@ build/
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Local Netlify folder
+.netlify

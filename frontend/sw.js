@@ -4,27 +4,58 @@
  * @version 1.0.0
  */
 
-const CACHE_NAME = 'linkspot-v3';
-const STATIC_CACHE = 'linkspot-static-v3';
-const API_CACHE = 'linkspot-api-v3';
+const CACHE_VERSION = 'v6';
+const STATIC_CACHE = `linkspot-static-${CACHE_VERSION}`;
+const API_CACHE = `linkspot-api-${CACHE_VERSION}`;
+const STATIC_MAX_BYTES = 1_500_000;
+const LOCAL_STATIC_ASSETS = new Set([
+    '/',
+    '/index.html',
+    '/css/styles.css',
+    '/js/app.js',
+    '/js/api-client.js',
+    '/js/sky-plot.js',
+    '/js/effects.js',
+    '/js/status-bar.js',
+    '/js/command-panel.js',
+    '/js/intel-panel.js',
+    '/js/route-renderer.js',
+    '/manifest.json',
+    '/assets/icon.svg',
+    '/assets/badge.svg'
+]);
+const EXTERNAL_STATIC_ASSETS = new Set([
+    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
+    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
+    'https://unpkg.com/lucide@latest/dist/umd/lucide.js'
+]);
 
 // Static assets to cache on install
 const STATIC_ASSETS = [
     '/',
     '/index.html',
     '/css/styles.css',
-    '/js/anymap-bundle.js',
-    '/js/anymap-bundle.css',
     '/js/app.js',
     '/js/api-client.js',
     '/js/sky-plot.js',
-    '/manifest.json'
+    '/js/effects.js',
+    '/js/status-bar.js',
+    '/js/command-panel.js',
+    '/js/intel-panel.js',
+    '/js/route-renderer.js',
+    '/manifest.json',
+    '/assets/icon.svg',
+    '/assets/badge.svg',
+    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
+    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
+    'https://unpkg.com/lucide@latest/dist/umd/lucide.js'
 ];
 
 // API routes that should use network-first strategy
 const API_ROUTES = [
     '/api/v1/analyze',
     '/api/v1/heatmap',
+    '/api/v1/route/',
     '/api/v1/satellites',
     '/api/v1/health'
 ];
@@ -35,7 +66,12 @@ const API_ROUTES = [
  * @returns {boolean} True if URL is an API endpoint
  */
 function isApiRequest(url) {
-    return API_ROUTES.some(route => url.includes(route));
+    try {
+        const parsed = new URL(url);
+        return API_ROUTES.some(route => parsed.pathname.startsWith(route));
+    } catch {
+        return false;
+    }
 }
 
 /**
@@ -44,13 +80,39 @@ function isApiRequest(url) {
  * @returns {boolean} True if URL is a static asset
  */
 function isStaticAsset(url) {
-    return STATIC_ASSETS.some(asset => url.includes(asset)) ||
-           url.includes('.css') ||
-           url.includes('.js') ||
-           url.includes('.png') ||
-           url.includes('.jpg') ||
-           url.includes('.svg') ||
-           url.includes('.json');
+    try {
+        const parsed = new URL(url);
+        const pathname = parsed.pathname;
+        if (parsed.origin !== self.location.origin) {
+            return EXTERNAL_STATIC_ASSETS.has(parsed.href);
+        }
+        return LOCAL_STATIC_ASSETS.has(pathname) ||
+               pathname.endsWith('.css') ||
+               pathname.endsWith('.js') ||
+               pathname.endsWith('.png') ||
+               pathname.endsWith('.jpg') ||
+               pathname.endsWith('.svg') ||
+               pathname.endsWith('.json');
+    } catch {
+        return false;
+    }
+}
+
+function cacheKeyForRequest(request) {
+    const url = new URL(request.url);
+    const params = Array.from(url.searchParams.entries()).sort(([a], [b]) => a.localeCompare(b));
+    url.search = new URLSearchParams(params).toString();
+    return new Request(url.toString(), { method: 'GET' });
+}
+
+async function fetchWithTimeout(request, timeoutMs = 12000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(request, { signal: controller.signal });
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 // Install event - cache static assets
@@ -115,6 +177,11 @@ self.addEventListener('fetch', (event) => {
         event.respondWith(networkFirstStrategy(request));
         return;
     }
+
+    if (request.mode === 'navigate') {
+        event.respondWith(networkWithCacheFallback(request));
+        return;
+    }
     
     // Static assets: Cache-first with network fallback
     if (isStaticAsset(url.href)) {
@@ -133,20 +200,27 @@ self.addEventListener('fetch', (event) => {
  * @returns {Promise<Response>} Response from network or cache
  */
 async function networkFirstStrategy(request) {
+    const cacheKey = cacheKeyForRequest(request);
     try {
-        const networkResponse = await fetch(request);
+        const networkResponse = await fetchWithTimeout(request, 12000);
         
-        if (networkResponse.ok) {
+        if (request.method === 'GET' && networkResponse.ok) {
             // Cache successful API responses
-            const cache = await caches.open(API_CACHE);
-            cache.put(request, networkResponse.clone());
+            try {
+                const cache = await caches.open(API_CACHE);
+                await cache.put(cacheKey, networkResponse.clone());
+            } catch (cacheError) {
+                console.warn('[SW] API cache write skipped:', cacheError);
+            }
         }
         
         return networkResponse;
     } catch (error) {
         console.log('[SW] Network failed, trying cache:', request.url);
         
-        const cachedResponse = await caches.match(request);
+        const cachedResponse = request.method === 'GET'
+            ? await caches.match(cacheKey)
+            : null;
         
         if (cachedResponse) {
             // Add header to indicate cached response
@@ -181,18 +255,36 @@ async function networkFirstStrategy(request) {
  * @returns {Promise<Response>} Response from cache or network
  */
 async function cacheFirstStrategy(request) {
-    const cachedResponse = await caches.match(request);
+    const cacheKey = cacheKeyForRequest(request);
+    const cachedResponse = await caches.match(cacheKey);
     
     if (cachedResponse) {
+        (async () => {
+            try {
+                const networkResponse = await fetchWithTimeout(request, 10000);
+                if (networkResponse.ok) {
+                    const contentLength = Number(networkResponse.headers.get('content-length') || '0');
+                    if (!contentLength || contentLength <= STATIC_MAX_BYTES) {
+                        const cache = await caches.open(STATIC_CACHE);
+                        await cache.put(cacheKey, networkResponse.clone());
+                    }
+                }
+            } catch (_error) {
+                // Background refresh failures are ignored.
+            }
+        })();
         return cachedResponse;
     }
     
     try {
-        const networkResponse = await fetch(request);
+        const networkResponse = await fetchWithTimeout(request, 10000);
         
         if (networkResponse.ok) {
-            const cache = await caches.open(STATIC_CACHE);
-            cache.put(request, networkResponse.clone());
+            const contentLength = Number(networkResponse.headers.get('content-length') || '0');
+            if (!contentLength || contentLength <= STATIC_MAX_BYTES) {
+                const cache = await caches.open(STATIC_CACHE);
+                cache.put(cacheKey, networkResponse.clone());
+            }
         }
         
         return networkResponse;
@@ -209,16 +301,19 @@ async function cacheFirstStrategy(request) {
  */
 async function networkWithCacheFallback(request) {
     try {
-        const networkResponse = await fetch(request);
+        const networkResponse = await fetchWithTimeout(request, 12000);
         return networkResponse;
     } catch (error) {
-        const cachedResponse = await caches.match(request);
+        const cachedResponse = await caches.match(cacheKeyForRequest(request));
         
         if (cachedResponse) {
             return cachedResponse;
         }
-        
-        throw error;
+
+        return new Response(
+            '<!doctype html><html><body><h1>Offline</h1><p>Resource unavailable while offline.</p></body></html>',
+            { status: 503, headers: { 'Content-Type': 'text/html' } }
+        );
     }
 }
 
@@ -246,8 +341,8 @@ self.addEventListener('push', (event) => {
         event.waitUntil(
             self.registration.showNotification(data.title, {
                 body: data.body,
-                icon: 'assets/icon-192.png',
-                badge: 'assets/badge-72.png',
+                icon: 'assets/icon.svg',
+                badge: 'assets/badge.svg',
                 data: data.data
             })
         );

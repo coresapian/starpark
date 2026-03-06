@@ -1,0 +1,63 @@
+appId: com.linkspot.app
+productName: LinkSpot
+copyright: Copyright © 2024 LinkSpot
+
+directories:
+  output: dist
+  buildResources: electron/build
+
+files:
+  - electron/**/*
+  - frontend/**/*
+  - "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}"
+  - "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}"
+  - "!**/node_modules/.cache/**"
+
+extraResources:
+  - from: docker-compose.yml
+    to: runtime/docker-compose.yml
+  - from: backend
+    to: runtime/backend
+    filter:
+      - "**/*"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+  - from: frontend
+    to: runtime/frontend
+  - from: scripts
+    to: runtime/scripts
+
+mac:
+  category: public.app-category.utilities
+  icon: electron/icons/icon.icns
+  extendInfo:
+    NSLocationUsageDescription: "LinkSpot needs your location to center the map and analyze satellite visibility from your position."
+    NSLocationWhenInUseUsageDescription: "LinkSpot needs your location to center the map and analyze satellite visibility from your position."
+  target:
+    - target: dmg
+      arch:
+        - universal
+    - target: zip
+      arch:
+        - universal
+  entitlements: electron/build/entitlements.mac.plist
+  entitlementsInherit: electron/build/entitlements.mac.inherit.plist
+  hardenedRuntime: true
+  gatekeeperAssess: false
+
+dmg:
+  title: LinkSpot
+  artifactName: LinkSpot-${version}-mac.${ext}
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+publish:
+  provider: github
+  owner: linkspot
+  repo: linkspot
+  releaseType: release

@@ -3,250 +3,347 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <meta name="theme-color" content="#1a1a2e">
-    <meta name="description" content="LinkSpot - Satellite Visibility Heat Map Analysis">
+    <meta name="theme-color" content="#0b1220">
+    <meta name="description" content="LinkSpot Mission Control - Route and satellite visibility planning">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    
-    <title>LinkSpot - Satellite Visibility Analysis</title>
-    
-    <!-- PWA Manifest -->
-    <link rel="manifest" href="manifest.json">
-    <link rel="apple-touch-icon" href="assets/icon-192.png">
-    
-    <!-- Anymap-ts Leaflet CSS (bundled from anymap-ts) -->
-    <link rel="stylesheet" href="js/anymap-bundle.css">
 
-    <!-- Custom Styles -->
+    <title>LinkSpot Mission Control</title>
+
+    <link rel="manifest" href="manifest.json">
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin="anonymous">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
     <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
-    <!-- Loading Indicator -->
-    <div id="loading-overlay" class="loading-overlay" aria-hidden="true">
-        <div class="loading-spinner" role="status">
-            <span class="sr-only">Loading...</span>
-        </div>
-        <p class="loading-text">Analyzing satellite visibility...</p>
-    </div>
-    
-    <!-- Offline Indicator -->
-    <div id="offline-indicator" class="offline-indicator" aria-hidden="true">
-        <span class="offline-icon">⚠️</span>
-        <span>Offline Mode</span>
-    </div>
-    
-    <!-- Main Map Container -->
-    <main id="map" class="map-container" role="main" aria-label="Satellite visibility heat map">
-        <!-- Map will be initialized here -->
-    </main>
-    
-    <!-- Search Bar (Top Center) -->
-    <div class="search-container" role="search">
-        <div class="search-wrapper">
-            <input 
-                type="text" 
-                id="search-input" 
-                class="search-input" 
-                placeholder="Search address or city..."
-                aria-label="Search location"
-                autocomplete="off"
-            >
-            <button 
-                id="search-btn" 
-                class="search-btn" 
-                aria-label="Search"
-                type="button"
-            >
-                <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-                    <path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
-                </svg>
-            </button>
-            <button 
-                id="search-clear" 
-                class="search-clear hidden" 
-                aria-label="Clear search"
-                type="button"
-            >
-                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-                    <path fill="currentColor" d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
-                </svg>
-            </button>
-        </div>
-        <div id="search-results" class="search-results" role="listbox" aria-label="Search results"></div>
-    </div>
-    
-    <!-- GPS Button (Top Right) -->
-    <button 
-        id="gps-btn" 
-        class="gps-btn" 
-        aria-label="Center on my location"
-        type="button"
-        title="My Location"
-    >
-        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
-            <path fill="currentColor" d="M12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm8.94 3A8.994 8.994 0 0 0 13 3.06V1h-2v2.06A8.994 8.994 0 0 0 3.06 11H1v2h2.06A8.994 8.994 0 0 0 11 20.94V23h2v-2.06A8.994 8.994 0 0 0 20.94 13H23v-2h-2.06zM12 19c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"/>
-        </svg>
-    </button>
-    
-    <!-- Time Slider Control (Bottom) -->
-    <div class="time-slider-container">
-        <div class="time-slider-header">
-            <span class="time-label">Analysis Time</span>
-            <span id="current-time" class="current-time">12:00</span>
-        </div>
-        <div class="time-slider-wrapper">
-            <button 
-                id="play-btn" 
-                class="play-btn" 
-                aria-label="Play time animation"
-                type="button"
-            >
-                <svg id="play-icon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-                    <path fill="currentColor" d="M8 5v14l11-7z"/>
-                </svg>
-                <svg id="pause-icon" class="hidden" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-                    <path fill="currentColor" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
-                </svg>
-            </button>
-            <input 
-                type="range" 
-                id="time-slider" 
-                class="time-slider"
-                min="0" 
-                max="95" 
-                value="48"
-                aria-label="Time slider"
-                aria-valuemin="0"
-                aria-valuemax="95"
-                aria-valuenow="48"
-            >
-        </div>
-        <div class="time-slider-labels">
-            <span>00:00</span>
-            <span>06:00</span>
-            <span>12:00</span>
-            <span>18:00</span>
-            <span>23:45</span>
-        </div>
-    </div>
-    
-    <!-- Legend Overlay (Bottom Right) -->
-    <div class="legend-container" role="complementary" aria-label="Map legend">
-        <h3 class="legend-title">Visibility Status</h3>
-        <div class="legend-items">
-            <div class="legend-item">
-                <span class="legend-color legend-clear"></span>
-                <span class="legend-label">Clear</span>
-                <span class="legend-desc">≥4 sats visible</span>
+    <div class="app-shell" id="app-shell" data-fx="medium" data-scene="eo" data-signal="clean">
+        <header class="status-bar panel" id="status-bar">
+            <div class="status-left">
+                <span class="status-led" id="led-backend" data-status="unknown"></span>
+                <span class="status-label">SYS</span>
+                <span class="status-led" id="led-buildings" data-status="unknown"></span>
+                <span class="status-label">BLD</span>
+                <span class="status-led" id="led-terrain" data-status="unknown"></span>
+                <span class="status-label">TER</span>
+                <span class="status-led" id="led-satellites" data-status="unknown"></span>
+                <span class="status-label">SAT</span>
+                <span class="status-led" id="led-routing" data-status="unknown"></span>
+                <span class="status-label">RTE</span>
             </div>
-            <div class="legend-item">
-                <span class="legend-color legend-marginal"></span>
-                <span class="legend-label">Marginal</span>
-                <span class="legend-desc">2-3 sats visible</span>
+            <div class="status-center">
+                <span class="status-title">LINKSPOT MISSION CONTROL</span>
             </div>
-            <div class="legend-item">
-                <span class="legend-color legend-dead"></span>
-                <span class="legend-label">Dead Zone</span>
-                <span class="legend-desc">0-1 sats visible</span>
+            <div class="status-right">
+                <span class="status-gps" id="gps-status" data-status="amber">NO FIX</span>
+                <span class="status-clock" id="utc-clock">00:00:00Z</span>
             </div>
-            <div class="legend-item legend-building">
-                <span class="legend-outline"></span>
-                <span class="legend-label">Building</span>
+        </header>
+
+        <aside class="command-sidebar panel" id="command-sidebar">
+            <div class="sidebar-tabs">
+                <button class="sidebar-tab active" data-tab="analysis" type="button">ANALYSIS</button>
+                <button class="sidebar-tab" data-tab="mission" type="button">MISSION</button>
             </div>
+
+            <div class="sidebar-panel" id="tab-analysis">
+                <section class="panel-section search-container" role="search">
+                    <label class="panel-label" for="search-input">TARGET LOCATION</label>
+                    <div class="search-wrapper">
+                        <input type="text" id="search-input" class="tactical-input search-input" placeholder="Search location or city..." autocomplete="off">
+                        <button id="search-btn" class="tactical-btn-icon search-btn" aria-label="Search" type="button">
+                            <i data-lucide="search"></i>
+                        </button>
+                        <button id="search-clear" class="tactical-btn-icon search-clear hidden" aria-label="Clear" type="button">
+                            <i data-lucide="x"></i>
+                        </button>
+                    </div>
+                    <div id="search-results" class="search-dropdown search-results" role="listbox" aria-label="Search results"></div>
+                </section>
+
+                <section class="panel-section">
+                    <label class="panel-label">QUICK STATS</label>
+                    <div class="stat-grid quick-grid">
+                        <div class="stat-block">
+                            <span class="stat-value" id="stat-visible">--</span>
+                            <span class="stat-label">VISIBLE</span>
+                        </div>
+                        <div class="stat-block">
+                            <span class="stat-value" id="stat-obstructed">--</span>
+                            <span class="stat-label">BLOCKED</span>
+                        </div>
+                        <div class="stat-block">
+                            <span class="stat-value" id="stat-coverage">--</span>
+                            <span class="stat-label">COVERAGE</span>
+                        </div>
+                        <div class="stat-block">
+                            <span class="stat-value" id="stat-zone">--</span>
+                            <span class="stat-label">ZONE</span>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="panel-section action-stack">
+                    <button id="gps-btn" class="tactical-btn" aria-label="Center on GPS" type="button">
+                        <i data-lucide="crosshair"></i>
+                        <span>Acquire GPS</span>
+                    </button>
+                    <button id="scan-area-btn" class="tactical-btn accent hidden" aria-label="Scan this area" type="button">
+                        <i data-lucide="radar"></i>
+                        <span>Scan Area</span>
+                    </button>
+                    <button id="route-plan-btn" class="tactical-btn accent hidden" aria-label="Plan route" type="button">
+                        <i data-lucide="navigation"></i>
+                        <span>Plan Route</span>
+                    </button>
+                </section>
+
+                <section class="panel-section fx-panel" aria-label="Effects intensity controls">
+                    <label class="panel-label">FX INTENSITY</label>
+                    <div class="fx-toggle" role="group" aria-label="FX intensity">
+                        <button id="fx-low" class="fx-level-btn" data-fx-level="low" type="button" aria-pressed="false">LOW</button>
+                        <button id="fx-medium" class="fx-level-btn active" data-fx-level="medium" type="button" aria-pressed="true">MEDIUM</button>
+                        <button id="fx-max" class="fx-level-btn" data-fx-level="max" type="button" aria-pressed="false">MAX</button>
+                    </div>
+                </section>
+
+                <section class="panel-section scene-panel" aria-label="Scene mode controls">
+                    <label class="panel-label">CLASSIFIED INTEL</label>
+                    <div class="scene-toggle" role="group" aria-label="Scene mode">
+                        <button id="scene-eo" class="scene-mode-btn active" data-scene-mode="eo" type="button" aria-pressed="true">EO</button>
+                        <button id="scene-flir" class="scene-mode-btn" data-scene-mode="flir" type="button" aria-pressed="false">FLIR</button>
+                        <button id="scene-crt" class="scene-mode-btn" data-scene-mode="crt" type="button" aria-pressed="false">CRT</button>
+                    </div>
+                </section>
+            </div>
+
+            <div class="sidebar-panel hidden" id="tab-mission">
+                <section class="panel-section">
+                    <label class="panel-label" for="mission-origin">ORIGIN</label>
+                    <input type="text" id="mission-origin" class="tactical-input" placeholder="Current location" autocomplete="off">
+                </section>
+
+                <section class="panel-section">
+                    <label class="panel-label" for="mission-destination">DESTINATION</label>
+                    <input type="text" id="mission-destination" class="tactical-input" placeholder="Destination..." autocomplete="off">
+                </section>
+
+                <section class="panel-section">
+                    <button id="compute-route-btn" class="tactical-btn accent" type="button">
+                        <i data-lucide="route"></i>
+                        <span>Compute Route</span>
+                    </button>
+                </section>
+
+                <section class="panel-section" id="waypoint-list-section" style="display:none">
+                    <label class="panel-label">WAYPOINTS</label>
+                    <div id="waypoint-list" class="waypoint-list"></div>
+                </section>
+            </div>
+
+            <div class="terminal-input">
+                <span class="terminal-prompt">&gt;</span>
+                <input type="text" id="terminal-cmd" class="terminal-field" placeholder="lat,lon">
+            </div>
+        </aside>
+
+        <main id="map" class="map-viewport" role="main" aria-label="Satellite map"></main>
+        <div class="scene-reticle-overlay" id="scene-reticle-overlay" aria-hidden="true">
+            <span class="reticle-ring"></span>
+            <span class="reticle-ring reticle-ring-inner"></span>
+            <span class="reticle-crosshair reticle-crosshair-h"></span>
+            <span class="reticle-crosshair reticle-crosshair-v"></span>
+            <span class="reticle-pulse"></span>
         </div>
-        <button 
-            id="legend-toggle" 
-            class="legend-toggle"
-            aria-label="Toggle legend"
-            aria-expanded="true"
-            type="button"
-        >
-            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-                <path fill="currentColor" d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/>
-            </svg>
-        </button>
-    </div>
-    
-    <!-- Detail Panel (Slide-out) -->
-    <aside 
-        id="detail-panel" 
-        class="detail-panel"
-        role="dialog"
-        aria-label="Location details"
-        aria-hidden="true"
-    >
-        <div class="detail-panel-header">
-            <h2 id="detail-title" class="detail-title">Location Details</h2>
-            <button 
-                id="detail-close" 
-                class="detail-close"
-                aria-label="Close details"
-                type="button"
-            >
-                <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
-                    <path fill="currentColor" d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
-                </svg>
+
+        <aside class="intel-panel panel" id="intel-panel">
+            <section class="panel-section route-summary-panel hidden" id="route-summary-panel" aria-live="polite">
+                <div class="route-summary-header">
+                    <h3 class="route-summary-title">Route Summary</h3>
+                    <button id="route-summary-clear" class="route-summary-clear" type="button">Clear</button>
+                </div>
+                <div class="route-summary-grid">
+                    <div class="route-summary-item">
+                        <span class="route-summary-label">Distance</span>
+                        <span id="route-summary-distance" class="route-summary-value">--</span>
+                    </div>
+                    <div class="route-summary-item">
+                        <span class="route-summary-label">ETA</span>
+                        <span id="route-summary-eta" class="route-summary-value">--</span>
+                    </div>
+                    <div class="route-summary-item">
+                        <span class="route-summary-label">Dead-Zone</span>
+                        <span id="route-summary-deadzone" class="route-summary-value">--</span>
+                    </div>
+                    <div class="route-summary-item">
+                        <span class="route-summary-label">Waypoints</span>
+                        <span id="route-summary-waypoints" class="route-summary-value">--</span>
+                    </div>
+                </div>
+                <label class="route-summary-toggle" for="route-auto-clear-toggle">
+                    <input id="route-auto-clear-toggle" type="checkbox" checked>
+                    <span>Auto-clear old route on new destination</span>
+                </label>
+            </section>
+
+            <section class="panel-section" id="mission-brief-section" style="display:none">
+                <label class="panel-label">MISSION BRIEF</label>
+                <div id="mission-brief" class="mission-brief"></div>
+            </section>
+
+            <section class="panel-section">
+                <label class="panel-label">SKY PLOT</label>
+                <div class="sky-plot-container">
+                    <canvas id="sky-plot" class="sky-plot" width="280" height="280"></canvas>
+                </div>
+            </section>
+
+            <section class="panel-section">
+                <label class="panel-label">SATELLITES</label>
+                <ul id="satellite-list" class="satellite-list"></ul>
+            </section>
+
+            <section class="panel-section">
+                <label class="panel-label">ANALYSIS</label>
+                <div id="analysis-stats" class="analysis-stats"></div>
+            </section>
+
+            <section class="panel-section instrument-panel" id="instrument-panel" aria-live="polite">
+                <label class="panel-label">INSTRUMENT CLUSTER</label>
+                <div class="instrument-gauges">
+                    <div class="hud-gauge" id="gauge-coverage">
+                        <span class="hud-gauge-needle" aria-hidden="true"></span>
+                        <span class="hud-gauge-value" id="gauge-coverage-value">--%</span>
+                        <span class="hud-gauge-name">Coverage</span>
+                    </div>
+                    <div class="hud-gauge" id="gauge-snr">
+                        <span class="hud-gauge-needle" aria-hidden="true"></span>
+                        <span class="hud-gauge-value" id="gauge-snr-value">-- dB</span>
+                        <span class="hud-gauge-name">Signal</span>
+                    </div>
+                    <div class="hud-gauge" id="gauge-track">
+                        <span class="hud-gauge-needle" aria-hidden="true"></span>
+                        <span class="hud-gauge-value" id="gauge-track-value">--</span>
+                        <span class="hud-gauge-name">Tracked</span>
+                    </div>
+                </div>
+                <div class="gizmo-strip">
+                    <div class="gizmo-dial" id="dial-drift">
+                        <span class="gizmo-ring" aria-hidden="true"></span>
+                        <span class="gizmo-label">DRIFT</span>
+                        <span class="gizmo-value" id="dial-drift-value">--%</span>
+                    </div>
+                    <div class="gizmo-dial" id="dial-lock">
+                        <span class="gizmo-ring" aria-hidden="true"></span>
+                        <span class="gizmo-label">LOCK</span>
+                        <span class="gizmo-value" id="dial-lock-value">--%</span>
+                    </div>
+                    <div class="gizmo-dial" id="dial-noise">
+                        <span class="gizmo-ring" aria-hidden="true"></span>
+                        <span class="gizmo-label">NOISE</span>
+                        <span class="gizmo-value" id="dial-noise-value">--%</span>
+                    </div>
+                </div>
+            </section>
+
+            <section class="panel-section" id="data-quality-section">
+                <label class="panel-label">DATA QUALITY</label>
+                <div id="data-quality-display" class="data-quality"></div>
+            </section>
+        </aside>
+
+        <footer class="timeline-bar panel" id="timeline-bar">
+            <button id="play-btn" class="tactical-btn-icon" aria-label="Play/Pause" type="button">
+                <i data-lucide="play" id="play-icon"></i>
+                <i data-lucide="pause" id="pause-icon" class="hidden"></i>
             </button>
-        </div>
-        <div class="detail-panel-content">
-            <div id="detail-coords" class="detail-coords"></div>
-            <div id="detail-status" class="detail-status"></div>
-            
-            <!-- Sky Plot Canvas -->
-            <div class="sky-plot-container">
-                <h3 class="sky-plot-title">Sky View</h3>
-                <canvas id="sky-plot" class="sky-plot" width="280" height="280"></canvas>
-                <div class="sky-plot-legend">
-                    <span class="sky-legend-item">
-                        <span class="sky-legend-marker sky-satellite"></span>
-                        Satellite
-                    </span>
-                    <span class="sky-legend-item">
-                        <span class="sky-legend-marker sky-obstruction"></span>
-                        Obstruction
-                    </span>
+            <div class="timeline-track">
+                <input type="range" id="time-slider" class="timeline-slider" min="0" max="95" value="48">
+                <div class="timeline-labels">
+                    <span>00:00</span>
+                    <span>06:00</span>
+                    <span>12:00</span>
+                    <span>18:00</span>
+                    <span>23:45</span>
                 </div>
             </div>
-            
-            <!-- Satellite List -->
-            <div class="satellite-list-container">
-                <h3 class="satellite-list-title">Visible Satellites</h3>
-                <ul id="satellite-list" class="satellite-list"></ul>
-            </div>
-            
-            <!-- Analysis Summary -->
-            <div class="analysis-summary">
-                <h3 class="analysis-title">Analysis Summary</h3>
-                <div id="analysis-stats" class="analysis-stats"></div>
-            </div>
-        </div>
-    </aside>
-    
-    <!-- Detail Panel Backdrop -->
-    <div id="detail-backdrop" class="detail-backdrop" aria-hidden="true"></div>
-    
-    <!-- Toast Notifications -->
-    <div id="toast-container" class="toast-container" role="status" aria-live="polite"></div>
-    
-    <!-- Anymap-ts Bundle (includes Leaflet via anymap-ts LeafletRenderer) -->
-    <script src="js/anymap-bundle.js"></script>
+            <span id="current-time" class="timeline-time">12:00</span>
+            <span class="timeline-date">UTC</span>
+        </footer>
 
-    <!-- Application Scripts -->
+        <section class="legend-container panel hidden" role="complementary" aria-label="Map legend">
+            <h3 class="legend-title">Visibility</h3>
+            <div class="legend-items">
+                <div class="legend-item"><span class="legend-color legend-clear"></span><span>Clear</span></div>
+                <div class="legend-item"><span class="legend-color legend-marginal"></span><span>Marginal</span></div>
+                <div class="legend-item"><span class="legend-color legend-dead"></span><span>Dead</span></div>
+            </div>
+            <button id="legend-toggle" class="legend-toggle" type="button" aria-label="Toggle legend">
+                <i data-lucide="chevron-down"></i>
+            </button>
+        </section>
+
+        <aside id="detail-panel" class="detail-panel hidden" aria-hidden="true" role="dialog">
+            <div class="detail-panel-header">
+                <h2 id="detail-title" class="detail-title">Location Details</h2>
+                <button id="detail-close" class="detail-close" type="button" aria-label="Close">
+                    <i data-lucide="x"></i>
+                </button>
+            </div>
+            <div class="detail-panel-content">
+                <div id="detail-coords" class="detail-coords"></div>
+                <div id="detail-status" class="detail-status"></div>
+            </div>
+        </aside>
+        <div id="detail-backdrop" class="detail-backdrop hidden" aria-hidden="true"></div>
+
+        <div id="loading-overlay" class="loading-overlay" aria-hidden="true">
+            <div class="loading-spinner" role="status"></div>
+            <p class="loading-text">Analyzing...</p>
+        </div>
+
+        <div id="offline-indicator" class="offline-indicator" aria-hidden="true">
+            <i data-lucide="wifi-off"></i>
+            <span>Offline Mode</span>
+        </div>
+
+        <div id="signal-degrade" class="signal-degrade-overlay" aria-hidden="true"></div>
+
+        <div id="signal-lost" class="signal-lost-overlay hidden">
+            <span class="signal-lost-text">SIGNAL LOST</span>
+        </div>
+
+        <div id="toast-container" class="toast-container" role="status" aria-live="polite"></div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+
     <script src="js/api-client.js"></script>
     <script src="js/sky-plot.js"></script>
+    <script src="js/effects.js"></script>
+    <script src="js/status-bar.js"></script>
+    <script src="js/command-panel.js"></script>
+    <script src="js/intel-panel.js"></script>
+    <script src="js/route-renderer.js"></script>
     <script src="js/app.js"></script>
-    
-    <!-- Service Worker Registration -->
+
     <script>
+        if (window.lucide && typeof window.lucide.createIcons === 'function') {
+            window.lucide.createIcons();
+        }
+
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
-                navigator.serviceWorker.register('sw.js')
-                    .then(registration => {
-                        console.log('SW registered:', registration.scope);
-                    })
-                    .catch(error => {
-                        console.log('SW registration failed:', error);
-                    });
+                navigator.serviceWorker.register('sw.js').catch(() => {});
             });
         }
     </script>

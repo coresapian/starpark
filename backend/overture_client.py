@@ -233,6 +233,7 @@ class OvertureMapsClient:
                         geometries.append(None)
                 else:
                     geometries.append(None)
+                # TODO: Add geometry validation for non-polygon or malformed WKB payloads before GeoDataFrame construction.
             
             df['geometry'] = geometries
             
@@ -248,6 +249,8 @@ class OvertureMapsClient:
             'class': 'building_class'
         }
         gdf = gdf.rename(columns={k: v for k, v in column_mapping.items() if k in gdf.columns})
+
+        # TODO: Normalize height fields so downstream pipeline can avoid per-consumer null/default coercion.
         
         return gdf
     
@@ -300,6 +303,7 @@ class OvertureMapsClient:
                 
         except Exception as e:
             logger.error(f"Failed to parse GeoParquet: {e}")
+            # TODO: Distinguish permission, malformed-schema, and transient read errors for caller-level fallback logic.
             return None
     
     def _filter_row_groups(
@@ -343,13 +347,22 @@ class OvertureMapsClient:
                 elif 'bbox.maxY' in str(col_name):
                     rg_max_y = col_meta.statistics.max
             
-            # Check intersection if bbox stats available
-            if has_bbox and rg_min_x is not None:
-                if (rg_max_x < min_lon or rg_min_x > max_lon or
-                    rg_max_y < min_lat or rg_min_y > max_lat):
-                    # Row group doesn't intersect - skip
+            # Check intersection if bbox stats available.
+            if (
+                has_bbox and
+                rg_min_x is not None and
+                rg_max_x is not None and
+                rg_min_y is not None and
+                rg_max_y is not None
+            ):
+                if (
+                    rg_max_x < min_lon or rg_min_x > max_lon or
+                    rg_max_y < min_lat or rg_min_y > max_lat
+                ):
+                    # Row group doesn't intersect - skip.
                     continue
-            
+
+            # Missing statistics: include row group and let row-level filter handle it.
             row_groups_to_read.append(rg_idx)
         
         logger.debug(
